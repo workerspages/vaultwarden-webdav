@@ -168,6 +168,8 @@ def parse_backup_date(filename: str) -> Optional[datetime.datetime]:
     """从文件名解析日期 vw_backup_YYYYMMDD_HHMMSS"""
     try:
         # 假设格式如: vw_backup_20231001_120000.tar.gz.enc
+        # 使用 basename 确保只处理文件名
+        filename = os.path.basename(filename)
         base = filename.split('.')[0] # 去掉后缀
         # 提取 vw_backup_ 后面的部分
         parts = base.split('_')
@@ -182,21 +184,20 @@ def parse_backup_date(filename: str) -> Optional[datetime.datetime]:
 def apply_retention_policy(client: WebDavClient, remote_dir: str):
     """应用 GFS 策略清理旧备份"""
     try:
-        # 注意：webdav4 的 ls 默认可能只返回名字，必须加 detail=True 才能获取完整字典信息
         files = client.ls(remote_dir, detail=True)
         backups = []
         
         # 筛选并解析备份文件
         for f in files:
-            # f 是一个字典，包含 name, size, type 等
             if f['type'] == 'directory':
                 continue
-                
-            name = f['name']
+            
+            # 确保只使用文件名部分进行解析
+            name = os.path.basename(f['name'])
             if "vw_backup_" in name:
                 dt = parse_backup_date(name)
                 if dt:
-                    backups.append({"name": name, "dt": dt, "path": name})
+                    backups.append({"name": name, "dt": dt, "path": f['name']})
         
         # 按时间倒序排列（最新的在前面）
         backups.sort(key=lambda x: x['dt'], reverse=True)
@@ -237,13 +238,21 @@ def apply_retention_policy(client: WebDavClient, remote_dir: str):
         # 标记删除
         for b in backups:
             if b['name'] not in to_keep:
-                to_delete.add(b['name'])
+                to_delete.add(b['path']) # 使用原始 path 删除
 
         # 执行删除
-        for name in to_delete:
-            full_path = f"{remote_dir}/{name}".replace("//", "/")
-            logging.info(f"GFS 策略清理: 删除 {name}")
-            client.remove(full_path)
+        for path in to_delete:
+            # 确保 path 是完整的
+            full_path = path
+            if not full_path.startswith('/'):
+                 # 如果 ls 返回的是相对路径，尝试拼接（视 webdav4 实现而定）
+                 full_path = f"{remote_dir}/{path}".replace("//", "/")
+            
+            logging.info(f"GFS 策略清理: 删除 {full_path}")
+            try:
+                client.remove(full_path)
+            except Exception as ex:
+                logging.warning(f"删除文件 {full_path} 失败: {ex}")
             
     except Exception as e:
         logging.error(f"GFS 清理过程出错: {e}")
@@ -306,17 +315,15 @@ def perform_backup():
         )
         
         remote_dir = cfg.get('webdav_path', '/')
-        # 确保远程目录存在
         try:
             if remote_dir != "/":
                 if not client.exists(remote_dir):
                     client.mkdir(remote_dir)
         except Exception as e:
-             logging.warning(f"尝试创建目录失败(可能已存在或权限不足): {e}")
+             logging.warning(f"尝试创建目录失败: {e}")
 
         remote_path = f"{remote_dir}/{backup_name}".replace("//", "/")
         
-        # 【修正】webdav4 使用 upload_file 方法
         client.upload_file(upload_path, remote_path)
         logging.info("上传成功。")
         
@@ -396,7 +403,9 @@ def process_restore_file(local_file_path: str):
 def download_and_restore(filename: str):
     """后台任务：从 WebDAV 下载并还原"""
     cfg = load_config()
-    local_path = os.path.join(TEMP_DIR, filename)
+    # 【修复关键】只使用文件名作为本地存储名，防止目录穿越或不存在的目录错误
+    local_filename = os.path.basename(filename)
+    local_path = os.path.join(TEMP_DIR, local_filename)
     
     try:
         logging.info(f"开始下载备份文件: {filename}")
@@ -404,9 +413,12 @@ def download_and_restore(filename: str):
             cfg["webdav_url"], 
             auth=(cfg.get("webdav_user", ""), cfg.get("webdav_password", ""))
         )
-        remote_path = f"{cfg.get('webdav_path', '/')}/{filename}".replace("//", "/")
         
-        # 【修正】webdav4 使用 download_file 方法
+        # 拼接远程路径：配置的目录 + 传入的文件名（如果是纯文件名）
+        # 如果 list_backups 返回的是全路径，这里逻辑需要适配。
+        # 现在的 list_backups 只返回纯文件名，所以这里拼接是安全的。
+        remote_path = f"{cfg.get('webdav_path', '/')}/{local_filename}".replace("//", "/")
+        
         client.download_file(remote_path, local_path)
         
         process_restore_file(local_path)
@@ -483,16 +495,18 @@ async def list_backups():
             cfg["webdav_url"], 
             auth=(cfg.get("webdav_user", ""), cfg.get("webdav_password", ""))
         )
-        # 【修正】必须加上 detail=True 才能返回包含 name, size 等信息的字典列表
         files = client.ls(cfg.get('webdav_path', '/'), detail=True)
         
         backup_files = []
         for f in files:
             # 确保是文件且名字包含 vw_backup_
             if f.get('type') != 'directory' and "vw_backup_" in f.get('name', ''):
+                # 【修复关键】只返回文件名，不返回带目录的路径
+                clean_name = os.path.basename(f['name'])
+                
                 size_mb = round(int(f.get('size', 0)) / 1024 / 1024, 2)
                 backup_files.append({
-                    "name": f['name'],
+                    "name": clean_name,
                     "size": f"{size_mb} MB",
                     "last_modified": f.get('last_modified', '')
                 })

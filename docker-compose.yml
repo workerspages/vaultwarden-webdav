@@ -9,6 +9,7 @@ services:
       - ./vw-conf:/conf  # 备份配置和日志
     environment:
       - WEBSOCKET_ENABLED=true  # 开启 Vaultwarden WebSocket
+      - TZ=Asia/Shanghai
     ports:
       - "8080:80"    # Vaultwarden 服务
       - "5000:5000"  # 管理面板

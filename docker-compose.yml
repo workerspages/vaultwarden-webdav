@@ -5,11 +5,19 @@ services:
     container_name: vaultwarden
     restart: always
     volumes:
-      - ./vw-data:/data  # 核心数据
-      - ./vw-conf:/conf  # 备份配置和日志
+      - ./vw-data:/data
+      - ./vw-conf:/conf
     environment:
-      - WEBSOCKET_ENABLED=true  # 开启 Vaultwarden WebSocket
+      # 时区
       - TZ=Asia/Shanghai
+      # Vaultwarden 基础配置
+      - WEBSOCKET_ENABLED=true 
+      
+      # ---【面板登录配置】---
+      # 如果不设置，默认为 admin / admin
+      - DASHBOARD_ADMIN_USER=myuser
+      - DASHBOARD_ADMIN_PASSWORD=mypassword123
+      
     ports:
-      - "8080:80"    # Vaultwarden 服务
-      - "5000:5000"  # 管理面板
+      - "8080:80"    # Vaultwarden 主服务
+      - "5000:5000"  # 备份管理面板

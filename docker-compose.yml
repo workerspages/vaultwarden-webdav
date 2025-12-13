@@ -1,0 +1,14 @@
+version: '3'
+services:
+  vaultwarden:
+    image: ghcr.io/workerspages/vaultwarden-webdav:latest
+    container_name: vaultwarden
+    restart: always
+    volumes:
+      - ./vw-data:/data  # 核心数据
+      - ./vw-conf:/conf  # 备份配置和日志
+    environment:
+      - WEBSOCKET_ENABLED=true  # 开启 Vaultwarden WebSocket
+    ports:
+      - "8080:80"    # Vaultwarden 服务
+      - "5000:5000"  # 管理面板

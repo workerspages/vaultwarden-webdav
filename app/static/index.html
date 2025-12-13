@@ -9,93 +9,271 @@
     <script src="https://unpkg.com/element-plus"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+    <script src="https://unpkg.com/@element-plus/icons-vue"></script>
     <style>
-        body { background-color: #f3f4f6; font-family: 'Inter', sans-serif; }
+        body { background-color: #f3f4f6; font-family: 'Inter', sans-serif; margin: 0; }
         .glass { background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(10px); }
+        .login-container { min-height: 100vh; display: flex; align-items: center; justify-content: center; background: linear-gradient(135deg, #101828 0%, #3b82f6 100%); }
+        .fade-in { animation: fadeIn 0.5s ease-in-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
     </style>
 </head>
 <body>
-    <div id="app" class="container mx-auto p-6 max-w-4xl">
-        <header class="flex justify-between items-center mb-8">
-            <h1 class="text-3xl font-bold text-gray-800">Vaultwarden <span class="text-blue-600">Admin</span></h1>
-            <el-tag type="success">Running</el-tag>
-        </header>
-
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <!-- 状态卡片 -->
-            <el-card class="glass shadow-lg rounded-xl">
-                <template #header><div class="font-bold">操作中心</div></template>
-                <div class="flex flex-col gap-4">
-                    <el-button type="primary" size="large" @click="backupNow" :loading="loading">立即备份到云端</el-button>
-                    <el-upload action="/api/upload_restore" :on-success="handleUploadSuccess" :show-file-list="false">
-                        <el-button type="warning" size="large" class="w-full">上传 .tar.gz 还原</el-button>
-                    </el-upload>
-                </div>
-            </el-card>
-
-            <!-- 配置卡片 -->
-            <el-card class="glass shadow-lg rounded-xl">
-                <template #header><div class="font-bold">WebDAV 设置</div></template>
-                <el-form label-position="top" size="small">
-                    <el-form-item label="WebDAV URL"><el-input v-model="config.webdav_url"></el-input></el-form-item>
-                    <el-form-item label="用户名"><el-input v-model="config.webdav_user"></el-input></el-form-item>
-                    <el-form-item label="密码"><el-input type="password" v-model="config.webdav_password" show-password></el-input></el-form-item>
-                    <el-form-item label="加密密码"><el-input type="password" v-model="config.encryption_password" show-password placeholder="用于加密备份文件"></el-input></el-form-item>
-                     <el-form-item label="Telegram Token"><el-input v-model="config.tg_bot_token"></el-input></el-form-item>
-                      <el-form-item label="Telegram Chat ID"><el-input v-model="config.tg_chat_id"></el-input></el-form-item>
-                    <el-button type="success" @click="saveConfig">保存配置</el-button>
+    <div id="app">
+        <!-- 登录界面 -->
+        <div v-if="!isLoggedIn" class="login-container">
+            <el-card class="w-96 glass shadow-2xl rounded-xl border-none">
+                <template #header>
+                    <div class="text-center">
+                        <h2 class="text-2xl font-bold text-gray-800">系统登录</h2>
+                        <p class="text-gray-500 text-sm mt-1">Vaultwarden Backup Admin</p>
+                    </div>
+                </template>
+                <el-form label-position="top" size="large" @submit.prevent="login">
+                    <el-form-item label="用户名">
+                        <el-input v-model="loginForm.username" prefix-icon="User" placeholder="DASHBOARD_ADMIN_USER"></el-input>
+                    </el-form-item>
+                    <el-form-item label="密码">
+                        <el-input v-model="loginForm.password" type="password" prefix-icon="Lock" show-password placeholder="DASHBOARD_ADMIN_PASSWORD"></el-input>
+                    </el-form-item>
+                    <el-button type="primary" class="w-full mt-4 font-bold" @click="login" :loading="loginLoading">登 录</el-button>
                 </el-form>
             </el-card>
         </div>
 
-        <!-- 历史备份列表 -->
-        <el-card class="mt-6 glass shadow-lg rounded-xl">
-            <template #header>
-                <div class="flex justify-between items-center">
-                    <span class="font-bold">云端备份历史 ({{ backups.length }})</span>
-                    <el-button size="small" @click="loadBackups" circle icon="el-icon-refresh"></el-button>
+        <!-- 主面板界面 (登录后显示) -->
+        <div v-else class="container mx-auto p-6 max-w-5xl fade-in">
+            <header class="flex justify-between items-center mb-8 bg-white p-4 rounded-xl shadow-sm">
+                <div class="flex items-center gap-3">
+                    <div class="bg-blue-600 text-white p-2 rounded-lg font-bold">VW</div>
+                    <h1 class="text-2xl font-bold text-gray-800">Vaultwarden <span class="text-blue-600">Admin</span></h1>
                 </div>
-            </template>
-            <el-table :data="backups" style="width: 100%" empty-text="无备份或未连接">
-                <el-table-column prop="name" label="文件名"></el-table-column>
-                <el-table-column prop="size" label="大小" width="120"></el-table-column>
-                <el-table-column label="操作" width="120">
-                    <template #default="scope">
-                        <el-popconfirm title="确定还原此备份？服务将重启。" @confirm="restore(scope.row.name)">
-                            <template #reference>
-                                <el-button size="small" type="danger">还原</el-button>
-                            </template>
-                        </el-popconfirm>
-                    </template>
-                </el-table-column>
-            </el-table>
-        </el-card>
+                <div class="flex items-center gap-4">
+                    <el-tag type="success" effect="dark" round>Service Running</el-tag>
+                    <el-button type="danger" plain size="small" @click="logout" icon="SwitchButton">退出</el-button>
+                </div>
+            </header>
+
+            <div class="grid grid-cols-1 md:grid-cols-12 gap-6">
+                <!-- 左侧：操作与配置 (占7份) -->
+                <div class="md:col-span-7 space-y-6">
+                    <!-- 操作卡片 -->
+                    <el-card class="glass shadow-lg rounded-xl">
+                        <template #header><div class="font-bold flex items-center gap-2"><el-icon><Operation /></el-icon> 快捷操作</div></template>
+                        <div class="flex flex-col gap-4">
+                            <div class="flex gap-4">
+                                <el-button type="primary" size="large" class="flex-1 h-12" @click="backupNow" :loading="loading" icon="UploadFilled">立即备份到云端</el-button>
+                                <el-upload 
+                                    class="flex-1"
+                                    action="/api/upload_restore" 
+                                    :headers="authHeaders" 
+                                    :on-success="handleUploadSuccess" 
+                                    :on-error="handleUploadError" 
+                                    :show-file-list="false" 
+                                    accept=".tar.gz,.enc">
+                                    <el-button type="warning" size="large" class="w-full h-12" icon="RefreshLeft">上传文件还原</el-button>
+                                </el-upload>
+                            </div>
+                            <p class="text-xs text-gray-400 text-center">支持上传 .tar.gz 或 .tar.gz.enc 文件进行覆盖还原</p>
+                        </div>
+                    </el-card>
+
+                    <!-- 配置卡片 -->
+                    <el-card class="glass shadow-lg rounded-xl">
+                        <template #header><div class="font-bold flex items-center gap-2"><el-icon><Setting /></el-icon> 系统配置</div></template>
+                        <el-form label-position="top" size="default">
+                            <el-form-item label="WebDAV 地址">
+                                <el-input v-model="config.webdav_url" placeholder="https://dav.example.com/"></el-input>
+                            </el-form-item>
+                            <div class="grid grid-cols-2 gap-4">
+                                <el-form-item label="WebDAV 用户名">
+                                    <el-input v-model="config.webdav_user"></el-input>
+                                </el-form-item>
+                                <el-form-item label="WebDAV 密码">
+                                    <el-input type="password" v-model="config.webdav_password" show-password></el-input>
+                                </el-form-item>
+                            </div>
+                            <el-divider content-position="left">高级设置</el-divider>
+                            <el-form-item label="WebDAV 存储路径">
+                                <el-input v-model="config.webdav_path" placeholder="/vaultwarden-backups"></el-input>
+                            </el-form-item>
+                            <el-form-item label="备份加密密码">
+                                <el-input type="password" v-model="config.encryption_password" show-password placeholder="若设置，备份文件将被 AES 加密"></el-input>
+                            </el-form-item>
+                            <div class="grid grid-cols-2 gap-4">
+                                <el-form-item label="定时备份 (小时)">
+                                    <el-input-number v-model="config.schedule_hour" :min="0" :max="23" class="w-full"></el-input-number>
+                                </el-form-item>
+                                <el-form-item label="定时备份 (分钟)">
+                                    <el-input-number v-model="config.schedule_minute" :min="0" :max="59" class="w-full"></el-input-number>
+                                </el-form-item>
+                            </div>
+                            <el-divider content-position="left">通知 (Telegram)</el-divider>
+                            <div class="grid grid-cols-2 gap-4">
+                                <el-form-item label="Bot Token">
+                                    <el-input v-model="config.tg_bot_token" placeholder="123456:ABC-DEF..."></el-input>
+                                </el-form-item>
+                                <el-form-item label="Chat ID">
+                                    <el-input v-model="config.tg_chat_id" placeholder="-100xxxxxx"></el-input>
+                                </el-form-item>
+                            </div>
+                            <el-button type="success" @click="saveConfig" class="w-full mt-2" icon="Check">保存所有配置</el-button>
+                        </el-form>
+                    </el-card>
+                </div>
+
+                <!-- 右侧：历史与日志 (占5份) -->
+                <div class="md:col-span-5 space-y-6">
+                    <!-- 历史备份 -->
+                    <el-card class="glass shadow-lg rounded-xl" body-style="padding: 0px">
+                        <template #header>
+                            <div class="flex justify-between items-center">
+                                <span class="font-bold flex items-center gap-2"><el-icon><List /></el-icon> 云端备份 ({{ backups.length }})</span>
+                                <el-button size="small" @click="loadBackups" circle icon="Refresh"></el-button>
+                            </div>
+                        </template>
+                        <div class="max-h-96 overflow-y-auto">
+                            <el-table :data="backups" style="width: 100%" :show-header="false" empty-text="暂无数据">
+                                <el-table-column min-width="180">
+                                    <template #default="scope">
+                                        <div class="flex flex-col">
+                                            <span class="text-sm font-medium text-gray-700 truncate" :title="scope.row.name">{{ scope.row.name }}</span>
+                                            <span class="text-xs text-gray-400">{{ scope.row.last_modified }}</span>
+                                        </div>
+                                    </template>
+                                </el-table-column>
+                                <el-table-column width="80" align="right">
+                                    <template #default="scope">
+                                        <span class="text-xs bg-gray-100 px-2 py-1 rounded">{{ scope.row.size }}</span>
+                                    </template>
+                                </el-table-column>
+                                <el-table-column width="60" align="center">
+                                    <template #default="scope">
+                                        <el-popconfirm title="危险：确定还原此备份？服务将重启。" width="200" @confirm="restore(scope.row.name)">
+                                            <template #reference>
+                                                <el-button size="small" type="danger" circle icon="Download"></el-button>
+                                            </template>
+                                        </el-popconfirm>
+                                    </template>
+                                </el-table-column>
+                            </el-table>
+                        </div>
+                    </el-card>
+
+                    <!-- 日志 -->
+                    <el-card class="glass shadow-lg rounded-xl">
+                        <template #header><div class="font-bold flex items-center gap-2"><el-icon><Document /></el-icon> 实时日志</div></template>
+                        <pre class="bg-slate-900 text-green-400 p-4 rounded-lg text-xs h-64 overflow-y-auto font-mono leading-relaxed">{{ logs }}</pre>
+                        <div class="mt-2 text-right">
+                            <el-button size="small" link @click="loadLogs">刷新日志</el-button>
+                        </div>
+                    </el-card>
+                </div>
+            </div>
+        </div>
     </div>
 
     <script>
-        const { createApp, ref, onMounted } = Vue;
-        createApp({
+        const { createApp, ref, computed, onMounted } = Vue;
+        const app = createApp({
             setup() {
-                const config = ref({});
+                const isLoggedIn = ref(false);
+                const loginLoading = ref(false);
+                const loginForm = ref({ username: '', password: '' });
+                const config = ref({ schedule_hour: 3, schedule_minute: 0, webdav_path: '/' });
                 const backups = ref([]);
+                const logs = ref('Waiting for logs...');
                 const loading = ref(false);
 
+                // 计算 Header 用于 el-upload 组件
+                const authHeaders = computed(() => {
+                    const token = localStorage.getItem('vw_auth_token');
+                    return token ? { 'Authorization': `Basic ${token}` } : {};
+                });
+
+                // Axios 请求拦截器
+                axios.interceptors.request.use(cfg => {
+                    const token = localStorage.getItem('vw_auth_token');
+                    if (token) {
+                        cfg.headers.Authorization = `Basic ${token}`;
+                    }
+                    return cfg;
+                }, error => Promise.reject(error));
+
+                // Axios 响应拦截器
+                axios.interceptors.response.use(res => res, err => {
+                    if (err.response && err.response.status === 401) {
+                        logout();
+                        ElementPlus.ElMessage.error('登录已失效，请重新登录');
+                    }
+                    return Promise.reject(err);
+                });
+
+                const login = async () => {
+                    if(!loginForm.value.username || !loginForm.value.password) return;
+                    loginLoading.value = true;
+                    // Base64 编码
+                    const token = btoa(`${loginForm.value.username}:${loginForm.value.password}`);
+                    // 临时存入 localStorage
+                    localStorage.setItem('vw_auth_token', token);
+                    
+                    try {
+                        // 验证 Token
+                        await axios.get('/api/auth_check');
+                        isLoggedIn.value = true;
+                        ElementPlus.ElMessage.success('欢迎回来');
+                        initData();
+                    } catch (e) {
+                        localStorage.removeItem('vw_auth_token');
+                        ElementPlus.ElMessage.error('用户名或密码错误');
+                    } finally {
+                        loginLoading.value = false;
+                    }
+                };
+
+                const logout = () => {
+                    localStorage.removeItem('vw_auth_token');
+                    isLoggedIn.value = false;
+                    loginForm.value = { username: '', password: '' };
+                };
+
+                const initData = async () => {
+                    await loadConfig();
+                    loadLogs();
+                    // 轮询日志
+                    setInterval(loadLogs, 10000);
+                };
+
                 const loadConfig = async () => {
-                    const res = await axios.get('/api/config');
-                    config.value = res.data;
-                    if(config.value.webdav_url) loadBackups();
+                    try {
+                        const res = await axios.get('/api/config');
+                        if(Object.keys(res.data).length > 0) {
+                            config.value = { ...config.value, ...res.data };
+                        }
+                        if(config.value.webdav_url) loadBackups();
+                    } catch(e) {}
                 };
 
                 const saveConfig = async () => {
-                    await axios.post('/api/config', config.value);
-                    ElementPlus.ElMessage.success('配置已保存');
+                    try {
+                        await axios.post('/api/config', config.value);
+                        ElementPlus.ElMessage.success('配置保存成功，调度任务已更新');
+                    } catch(e) {
+                        ElementPlus.ElMessage.error('保存失败');
+                    }
                 };
 
                 const backupNow = async () => {
                     loading.value = true;
-                    await axios.post('/api/backup/now');
-                    ElementPlus.ElMessage.success('后台备份任务已开始');
-                    loading.value = false;
+                    try {
+                        await axios.post('/api/backup/now');
+                        ElementPlus.ElMessage.success('后台备份任务已启动');
+                        setTimeout(loadLogs, 1000);
+                    } catch(e) {
+                        ElementPlus.ElMessage.error('触发失败');
+                    } finally {
+                        loading.value = false;
+                    }
                 };
 
                 const loadBackups = async () => {
@@ -107,20 +285,59 @@
                     }
                 };
 
+                const loadLogs = async () => {
+                    if(!isLoggedIn.value) return;
+                    try {
+                        const res = await axios.get('/api/logs');
+                        logs.value = res.data.logs;
+                    } catch (e) {}
+                };
+
                 const restore = async (name) => {
-                    await axios.post('/api/restore?file_name=' + name);
-                    ElementPlus.ElMessage.warning('还原中，完成后服务将自动重启');
+                    try {
+                        await axios.post('/api/restore?file_name=' + name);
+                        ElementPlus.ElMessage.warning('正在后台下载并还原，完成后服务将自动重启');
+                        setTimeout(loadLogs, 2000);
+                    } catch(e) {
+                        ElementPlus.ElMessage.error('请求失败');
+                    }
                 };
                 
                 const handleUploadSuccess = () => {
-                     ElementPlus.ElMessage.warning('文件上传成功，正在还原...');
-                }
+                     ElementPlus.ElMessage.success('文件上传成功，正在解压还原...');
+                     setTimeout(loadLogs, 2000);
+                };
+                
+                const handleUploadError = () => {
+                    ElementPlus.ElMessage.error('上传失败，请检查网络或权限');
+                };
 
-                onMounted(loadConfig);
+                onMounted(() => {
+                    if (localStorage.getItem('vw_auth_token')) {
+                        axios.get('/api/auth_check')
+                            .then(() => {
+                                isLoggedIn.value = true;
+                                initData();
+                            })
+                            .catch(() => {
+                                localStorage.removeItem('vw_auth_token');
+                            });
+                    }
+                });
 
-                return { config, backups, saveConfig, backupNow, restore, loading, loadBackups, handleUploadSuccess };
+                return { 
+                    isLoggedIn, loginForm, login, logout, loginLoading,
+                    config, backups, logs, saveConfig, backupNow, restore, loading, loadBackups, 
+                    handleUploadSuccess, handleUploadError, authHeaders, loadLogs
+                };
             }
-        }).use(ElementPlus).mount('#app');
+        });
+        
+        // 自动注册所有图标
+        for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
+            app.component(key, component)
+        }
+        app.use(ElementPlus).mount('#app');
     </script>
 </body>
 </html>

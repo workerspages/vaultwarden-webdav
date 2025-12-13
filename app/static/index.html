@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Vaultwarden 管理面板</title>
+    <title>Vaultwarden WebDAV 管理面板</title>
     <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
     <link rel="stylesheet" href="https://unpkg.com/element-plus/dist/index.css" />
     <script src="https://unpkg.com/element-plus"></script>
@@ -16,6 +16,8 @@
         .login-container { min-height: 100vh; display: flex; align-items: center; justify-content: center; background: linear-gradient(135deg, #101828 0%, #3b82f6 100%); }
         .fade-in { animation: fadeIn 0.5s ease-in-out; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        /* 修复表格内边距，让列表更紧凑美观 */
+        .el-table .el-table__cell { padding: 8px 0; }
     </style>
 </head>
 <body>
@@ -26,7 +28,7 @@
                 <template #header>
                     <div class="text-center">
                         <h2 class="text-2xl font-bold text-gray-800">系统登录</h2>
-                        <p class="text-gray-500 text-sm mt-1">Vaultwarden Backup Admin</p>
+                        <p class="text-gray-500 text-sm mt-1">Vaultwarden Backup WebDAV</p>
                     </div>
                 </template>
                 <el-form label-position="top" size="large" @submit.prevent="login">
@@ -150,7 +152,8 @@
                         </template>
                         <div class="max-h-96 overflow-y-auto">
                             <el-table :data="backups" style="width: 100%" :show-header="false" empty-text="暂无数据">
-                                <el-table-column min-width="180">
+                                <!-- 文件名列 -->
+                                <el-table-column min-width="160">
                                     <template #default="scope">
                                         <div class="flex flex-col">
                                             <span class="text-sm font-medium text-gray-700 truncate" :title="scope.row.name">{{ scope.row.name }}</span>
@@ -158,11 +161,15 @@
                                         </div>
                                     </template>
                                 </el-table-column>
-                                <el-table-column width="110" align="right">
+                                
+                                <!-- 【UI修复】文件大小列：增加宽度，强制不换行 -->
+                                <el-table-column width="100" align="right">
                                     <template #default="scope">
-                                        <span class="text-xs bg-gray-100 px-2 py-1 rounded">{{ scope.row.size }}</span>
+                                        <span class="text-xs bg-gray-100 px-2 py-1 rounded whitespace-nowrap">{{ scope.row.size }}</span>
                                     </template>
                                 </el-table-column>
+                                
+                                <!-- 操作按钮列 -->
                                 <el-table-column width="60" align="center">
                                     <template #default="scope">
                                         <el-popconfirm title="危险：确定还原此备份？服务将重启。" width="200" @confirm="restore(scope.row.name)">
@@ -196,7 +203,6 @@
                 const isLoggedIn = ref(false);
                 const loginLoading = ref(false);
                 const loginForm = ref({ username: '', password: '' });
-                // 默认配置
                 const config = ref({ 
                     schedule_cron: '0 3 * * *', 
                     max_backups: 10,
@@ -206,13 +212,11 @@
                 const logs = ref('Waiting for logs...');
                 const loading = ref(false);
 
-                // 计算 Header
                 const authHeaders = computed(() => {
                     const token = localStorage.getItem('vw_auth_token');
                     return token ? { 'Authorization': `Basic ${token}` } : {};
                 });
 
-                // Axios 拦截器
                 axios.interceptors.request.use(cfg => {
                     const token = localStorage.getItem('vw_auth_token');
                     if (token) {
@@ -265,7 +269,6 @@
                         const res = await axios.get('/api/config');
                         if(Object.keys(res.data).length > 0) {
                             config.value = { ...config.value, ...res.data };
-                            // 如果旧配置没有这些字段，赋予默认值
                             if(!config.value.schedule_cron) config.value.schedule_cron = '0 3 * * *';
                             if(!config.value.max_backups) config.value.max_backups = 10;
                         }

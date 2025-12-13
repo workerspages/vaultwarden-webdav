@@ -74,7 +74,6 @@
                                     <el-button type="warning" size="large" class="w-full h-12" icon="RefreshLeft">上传文件还原</el-button>
                                 </el-upload>
                             </div>
-                            <p class="text-xs text-gray-400 text-center">支持上传 .tar.gz 或 .tar.gz.enc 文件进行覆盖还原</p>
                         </div>
                     </el-card>
 
@@ -93,6 +92,30 @@
                                     <el-input type="password" v-model="config.webdav_password" show-password></el-input>
                                 </el-form-item>
                             </div>
+                            
+                            <el-divider content-position="left">策略设置</el-divider>
+                            <div class="grid grid-cols-2 gap-4">
+                                <el-form-item label="定时备份策略 (Cron 表达式)">
+                                    <template #label>
+                                        <span>Cron 表达式</span>
+                                        <el-tooltip content="例如: '0 */5 * * *' 表示每5分钟一次，'0 3 * * *' 表示每天凌晨3点" placement="top">
+                                            <el-icon class="ml-1"><QuestionFilled /></el-icon>
+                                        </el-tooltip>
+                                    </template>
+                                    <el-input v-model="config.schedule_cron" placeholder="0 3 * * *"></el-input>
+                                    <a href="https://crontab.guru/" target="_blank" class="text-xs text-blue-500 mt-1 block">Cron 表达式生成助手</a>
+                                </el-form-item>
+                                <el-form-item label="云端保留备份数量">
+                                     <template #label>
+                                        <span>最大保留数量</span>
+                                        <el-tooltip content="云端只保留最新的N份备份，多余的将被自动删除" placement="top">
+                                            <el-icon class="ml-1"><QuestionFilled /></el-icon>
+                                        </el-tooltip>
+                                    </template>
+                                    <el-input-number v-model="config.max_backups" :min="1" :max="999" class="w-full"></el-input-number>
+                                </el-form-item>
+                            </div>
+
                             <el-divider content-position="left">高级设置</el-divider>
                             <el-form-item label="WebDAV 存储路径">
                                 <el-input v-model="config.webdav_path" placeholder="/vaultwarden-backups"></el-input>
@@ -100,14 +123,7 @@
                             <el-form-item label="备份加密密码">
                                 <el-input type="password" v-model="config.encryption_password" show-password placeholder="若设置，备份文件将被 AES 加密"></el-input>
                             </el-form-item>
-                            <div class="grid grid-cols-2 gap-4">
-                                <el-form-item label="定时备份 (小时)">
-                                    <el-input-number v-model="config.schedule_hour" :min="0" :max="23" class="w-full"></el-input-number>
-                                </el-form-item>
-                                <el-form-item label="定时备份 (分钟)">
-                                    <el-input-number v-model="config.schedule_minute" :min="0" :max="59" class="w-full"></el-input-number>
-                                </el-form-item>
-                            </div>
+                            
                             <el-divider content-position="left">通知 (Telegram)</el-divider>
                             <div class="grid grid-cols-2 gap-4">
                                 <el-form-item label="Bot Token">
@@ -180,18 +196,23 @@
                 const isLoggedIn = ref(false);
                 const loginLoading = ref(false);
                 const loginForm = ref({ username: '', password: '' });
-                const config = ref({ schedule_hour: 3, schedule_minute: 0, webdav_path: '/' });
+                // 默认配置
+                const config = ref({ 
+                    schedule_cron: '0 3 * * *', 
+                    max_backups: 10,
+                    webdav_path: '/' 
+                });
                 const backups = ref([]);
                 const logs = ref('Waiting for logs...');
                 const loading = ref(false);
 
-                // 计算 Header 用于 el-upload 组件
+                // 计算 Header
                 const authHeaders = computed(() => {
                     const token = localStorage.getItem('vw_auth_token');
                     return token ? { 'Authorization': `Basic ${token}` } : {};
                 });
 
-                // Axios 请求拦截器
+                // Axios 拦截器
                 axios.interceptors.request.use(cfg => {
                     const token = localStorage.getItem('vw_auth_token');
                     if (token) {
@@ -200,7 +221,6 @@
                     return cfg;
                 }, error => Promise.reject(error));
 
-                // Axios 响应拦截器
                 axios.interceptors.response.use(res => res, err => {
                     if (err.response && err.response.status === 401) {
                         logout();
@@ -212,13 +232,10 @@
                 const login = async () => {
                     if(!loginForm.value.username || !loginForm.value.password) return;
                     loginLoading.value = true;
-                    // Base64 编码
                     const token = btoa(`${loginForm.value.username}:${loginForm.value.password}`);
-                    // 临时存入 localStorage
                     localStorage.setItem('vw_auth_token', token);
                     
                     try {
-                        // 验证 Token
                         await axios.get('/api/auth_check');
                         isLoggedIn.value = true;
                         ElementPlus.ElMessage.success('欢迎回来');
@@ -240,7 +257,6 @@
                 const initData = async () => {
                     await loadConfig();
                     loadLogs();
-                    // 轮询日志
                     setInterval(loadLogs, 10000);
                 };
 
@@ -249,6 +265,9 @@
                         const res = await axios.get('/api/config');
                         if(Object.keys(res.data).length > 0) {
                             config.value = { ...config.value, ...res.data };
+                            // 如果旧配置没有这些字段，赋予默认值
+                            if(!config.value.schedule_cron) config.value.schedule_cron = '0 3 * * *';
+                            if(!config.value.max_backups) config.value.max_backups = 10;
                         }
                         if(config.value.webdav_url) loadBackups();
                     } catch(e) {}
@@ -333,7 +352,6 @@
             }
         });
         
-        // 自动注册所有图标
         for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
             app.component(key, component)
         }

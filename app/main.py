@@ -136,12 +136,13 @@ def start_service():
 # --- 过滤器逻辑 ---
 
 def is_file_allowed(filename: str) -> bool:
-    """检查文件是否允许备份 (过滤系统垃圾文件)"""
-    if filename in ['lost+found', '.DS_Store', 'Thumbs.db', 'icon_cache']:
+    """检查文件是否允许备份"""
+    
+    # 唯一建议保留的过滤：防止因权限问题导致备份失败
+    if filename == 'lost+found':
         return False
-    # 过滤明显的临时文件
-    if filename.endswith('.bak') or filename.endswith('.tmp') or filename.endswith('.swp'):
-        return False
+        
+    # 其他所有文件（包括图标缓存、临时文件等）全部备份
     return True
 
 # --- 保留策略逻辑 ---

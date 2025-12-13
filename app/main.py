@@ -67,7 +67,6 @@ app.add_middleware(
 
 def check_auth(credentials: HTTPBasicCredentials = Depends(security)):
     """验证用户名和密码"""
-    # 使用 secrets.compare_digest 防止时序攻击
     is_user_correct = secrets.compare_digest(credentials.username, ADMIN_USER)
     is_pass_correct = secrets.compare_digest(credentials.password, ADMIN_PASS)
     
@@ -162,100 +161,62 @@ def decrypt_file(file_path: str, password: str) -> str:
         
     return out_path
 
-# --- GFS (Grandfather-Father-Son) 保留策略逻辑 ---
-
-def parse_backup_date(filename: str) -> Optional[datetime.datetime]:
-    """从文件名解析日期 vw_backup_YYYYMMDD_HHMMSS"""
-    try:
-        # 假设格式如: vw_backup_20231001_120000.tar.gz.enc
-        # 使用 basename 确保只处理文件名
-        filename = os.path.basename(filename)
-        base = filename.split('.')[0] # 去掉后缀
-        # 提取 vw_backup_ 后面的部分
-        parts = base.split('_')
-        if len(parts) >= 3:
-            date_str = f"{parts[2]}_{parts[3]}"
-            dt = datetime.datetime.strptime(date_str, "%Y%m%d_%H%M%S")
-            return dt.replace(tzinfo=TZ_CN)
-    except Exception:
-        return None
-    return None
+# --- 保留策略逻辑 (已修改为按数量保留) ---
 
 def apply_retention_policy(client: WebDavClient, remote_dir: str):
-    """应用 GFS 策略清理旧备份"""
+    """应用保留策略：保留最新的 N 个备份，删除旧的"""
+    cfg = load_config()
+    # 默认保留 10 份
+    max_backups = int(cfg.get("max_backups", 10))
+    if max_backups < 1:
+        max_backups = 10
+
     try:
         files = client.ls(remote_dir, detail=True)
         backups = []
         
-        # 筛选并解析备份文件
+        # 筛选备份文件
         for f in files:
             if f['type'] == 'directory':
                 continue
             
-            # 确保只使用文件名部分进行解析
+            # 确保只使用文件名部分进行匹配
             name = os.path.basename(f['name'])
             if "vw_backup_" in name:
-                dt = parse_backup_date(name)
-                if dt:
-                    backups.append({"name": name, "dt": dt, "path": f['name']})
+                # 记录完整信息
+                backups.append({
+                    "name": name, 
+                    "path": f['name'],
+                    # 使用文件名排序即可 (因为文件名包含 YYYYMMDD_HHMMSS)
+                    # 也可以解析时间，但文件名排序对于这种格式是等效且更快的
+                    "sort_key": name 
+                })
         
-        # 按时间倒序排列（最新的在前面）
-        backups.sort(key=lambda x: x['dt'], reverse=True)
+        # 按名称降序排列（最新的在前面）
+        backups.sort(key=lambda x: x['sort_key'], reverse=True)
         
-        if not backups:
-            return
+        logging.info(f"当前共有 {len(backups)} 个备份，保留策略设置为: {max_backups}")
 
-        now = datetime.datetime.now(TZ_CN)
-        to_keep = set()
-        to_delete = set()
-
-        # 策略定义
-        keep_days = 7
-        keep_weeks = 4
-        keep_months = 12
-
-        # 1. 保留最近 7 天的所有备份
-        for b in backups:
-            if (now - b['dt']).days < keep_days:
-                to_keep.add(b['name'])
-
-        # 2. 保留最近 4 周（每周一份，取该周最新的）
-        for i in range(keep_weeks):
-            start_window = now - datetime.timedelta(weeks=i+1)
-            end_window = now - datetime.timedelta(weeks=i)
-            candidates = [b for b in backups if start_window <= b['dt'] < end_window]
-            if candidates:
-                to_keep.add(candidates[0]['name'])
-
-        # 3. 保留最近 12 个月（每月一份，取该月最新的）
-        for i in range(keep_months):
-            start_window = now - datetime.timedelta(days=(i+1)*30)
-            end_window = now - datetime.timedelta(days=i*30)
-            candidates = [b for b in backups if start_window <= b['dt'] < end_window]
-            if candidates:
-                to_keep.add(candidates[0]['name'])
-
-        # 标记删除
-        for b in backups:
-            if b['name'] not in to_keep:
-                to_delete.add(b['path']) # 使用原始 path 删除
-
-        # 执行删除
-        for path in to_delete:
-            # 确保 path 是完整的
-            full_path = path
-            if not full_path.startswith('/'):
-                 # 如果 ls 返回的是相对路径，尝试拼接（视 webdav4 实现而定）
-                 full_path = f"{remote_dir}/{path}".replace("//", "/")
+        # 如果数量超过限制，删除旧的
+        if len(backups) > max_backups:
+            to_delete = backups[max_backups:] # 取出第 N+1 个之后的所有文件
             
-            logging.info(f"GFS 策略清理: 删除 {full_path}")
-            try:
-                client.remove(full_path)
-            except Exception as ex:
-                logging.warning(f"删除文件 {full_path} 失败: {ex}")
+            for item in to_delete:
+                full_path = item['path']
+                # 兼容处理
+                if not full_path.startswith('/'):
+                     full_path = f"{remote_dir}/{item['path']}".replace("//", "/")
+                
+                logging.info(f"保留策略清理: 删除旧备份 {item['name']}")
+                try:
+                    client.remove(full_path)
+                except Exception as ex:
+                    logging.warning(f"删除文件失败: {ex}")
+            
+            send_telegram_notify(f"保留策略执行完毕，清理了 {len(to_delete)} 个旧备份。")
             
     except Exception as e:
-        logging.error(f"GFS 清理过程出错: {e}")
+        logging.error(f"保留策略清理过程出错: {e}")
 
 # --- 核心备份逻辑 ---
 
@@ -327,11 +288,11 @@ def perform_backup():
         client.upload_file(upload_path, remote_path)
         logging.info("上传成功。")
         
-        # 5. 执行 GFS 保留策略
-        logging.info("正在执行 GFS 保留策略...")
+        # 5. 执行保留策略
+        logging.info("正在检查保留策略...")
         apply_retention_policy(client, remote_dir)
 
-        send_telegram_notify(f"备份文件已上传: {backup_name}\nGFS 策略检查完成。")
+        send_telegram_notify(f"备份文件已上传: {backup_name}")
 
     except Exception as e:
         logging.error(f"备份流程失败: {e}", exc_info=True)
@@ -403,7 +364,6 @@ def process_restore_file(local_file_path: str):
 def download_and_restore(filename: str):
     """后台任务：从 WebDAV 下载并还原"""
     cfg = load_config()
-    # 【修复关键】只使用文件名作为本地存储名，防止目录穿越或不存在的目录错误
     local_filename = os.path.basename(filename)
     local_path = os.path.join(TEMP_DIR, local_filename)
     
@@ -414,19 +374,15 @@ def download_and_restore(filename: str):
             auth=(cfg.get("webdav_user", ""), cfg.get("webdav_password", ""))
         )
         
-        # 拼接远程路径：配置的目录 + 传入的文件名（如果是纯文件名）
-        # 如果 list_backups 返回的是全路径，这里逻辑需要适配。
-        # 现在的 list_backups 只返回纯文件名，所以这里拼接是安全的。
         remote_path = f"{cfg.get('webdav_path', '/')}/{local_filename}".replace("//", "/")
         
         client.download_file(remote_path, local_path)
-        
         process_restore_file(local_path)
     except Exception as e:
         logging.error(f"下载/还原过程出错: {e}")
         send_telegram_notify(f"下载/还原过程出错: {e}", success=False)
 
-# --- 调度器设置 ---
+# --- 调度器设置 (使用 Cron 表达式) ---
 
 scheduler = BackgroundScheduler(timezone=TZ_CN)
 
@@ -435,27 +391,40 @@ def schedule_backup_job(config: dict):
     if scheduler.get_job('backup_job'):
         scheduler.remove_job('backup_job')
     
-    hour = int(config.get('schedule_hour', 3))
-    minute = int(config.get('schedule_minute', 0))
+    # 默认每天凌晨 3 点 (0 3 * * *)
+    cron_exp = config.get('schedule_cron', '0 3 * * *')
     
-    scheduler.add_job(
-        perform_backup, 
-        CronTrigger(hour=hour, minute=minute, timezone=TZ_CN), 
-        id='backup_job',
-        replace_existing=True
-    )
-    logging.info(f"备份任务已调度: 每天 {hour:02d}:{minute:02d}")
+    try:
+        # 使用 from_crontab 解析 Cron 表达式
+        trigger = CronTrigger.from_crontab(cron_exp, timezone=TZ_CN)
+        
+        scheduler.add_job(
+            perform_backup, 
+            trigger, 
+            id='backup_job',
+            replace_existing=True
+        )
+        logging.info(f"备份任务已更新，Cron 表达式: {cron_exp}")
+    except ValueError as e:
+        logging.error(f"Cron 表达式错误: {cron_exp}, 错误信息: {e}")
+        # 如果出错，回滚到安全默认值
+        logging.warning("将使用默认策略 (每天 03:00)")
+        scheduler.add_job(
+            perform_backup, 
+            CronTrigger(hour=3, minute=0, timezone=TZ_CN), 
+            id='backup_job',
+            replace_existing=True
+        )
 
 scheduler.start()
 initial_cfg = load_config()
 schedule_backup_job(initial_cfg)
 
 
-# --- API 路由定义 (除根路径外全部开启鉴权) ---
+# --- API 路由定义 ---
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root():
-    """返回前端页面 (不需要鉴权)"""
     index_path = "/app/static/index.html"
     if not os.path.exists(index_path):
         index_path = "app/static/index.html"
@@ -463,11 +432,10 @@ async def read_root():
     if os.path.exists(index_path):
         with open(index_path, "r", encoding="utf-8") as f:
             return f.read()
-    return "UI File Not Found. Please check deployment."
+    return "UI File Not Found."
 
 @app.get("/api/auth_check", dependencies=[Depends(check_auth)])
 async def auth_check():
-    """用于前端验证 Token 是否有效"""
     return {"status": "authenticated"}
 
 @app.get("/api/config", dependencies=[Depends(check_auth)])
@@ -499,11 +467,8 @@ async def list_backups():
         
         backup_files = []
         for f in files:
-            # 确保是文件且名字包含 vw_backup_
             if f.get('type') != 'directory' and "vw_backup_" in f.get('name', ''):
-                # 【修复关键】只返回文件名，不返回带目录的路径
                 clean_name = os.path.basename(f['name'])
-                
                 size_mb = round(int(f.get('size', 0)) / 1024 / 1024, 2)
                 backup_files.append({
                     "name": clean_name,

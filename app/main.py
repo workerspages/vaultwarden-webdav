@@ -31,13 +31,15 @@ LOG_FILE = os.path.join(CONF_DIR, "manager.log")
 TEMP_DIR = "/tmp/backup_work"
 TZ_CN = timezone('Asia/Shanghai')
 
-# 读取环境变量中的管理员账号密码，默认为 admin/admin
+# 读取环境变量中的管理员账号密码
 ADMIN_USER = os.getenv("DASHBOARD_ADMIN_USER", "admin")
 ADMIN_PASS = os.getenv("DASHBOARD_ADMIN_PASSWORD", "admin")
 
 # 确保必要目录存在
 os.makedirs(CONF_DIR, exist_ok=True)
 os.makedirs(TEMP_DIR, exist_ok=True)
+# 确保数据目录存在（防止首次启动报错）
+os.makedirs(DATA_DIR, exist_ok=True)
 
 # 日志配置
 logging.basicConfig(
@@ -64,10 +66,8 @@ app.add_middleware(
 # --- 鉴权函数 ---
 
 def check_auth(credentials: HTTPBasicCredentials = Depends(security)):
-    """验证用户名和密码"""
     is_user_correct = secrets.compare_digest(credentials.username, ADMIN_USER)
     is_pass_correct = secrets.compare_digest(credentials.password, ADMIN_PASS)
-    
     if not (is_user_correct and is_pass_correct):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -136,6 +136,16 @@ def decrypt_file(file_path: str, password: str) -> str:
     with open(out_path, 'wb') as f: f.write(decrypted_data)
     return out_path
 
+# --- 服务控制函数 ---
+
+def stop_service():
+    logging.info("正在停止 Vaultwarden 服务...")
+    subprocess.run(["supervisorctl", "stop", "vaultwarden"], check=True)
+
+def start_service():
+    logging.info("正在启动 Vaultwarden 服务...")
+    subprocess.run(["supervisorctl", "start", "vaultwarden"], check=True)
+
 # --- 保留策略逻辑 ---
 
 def apply_retention_policy(client: WebDavClient, remote_dir: str):
@@ -153,33 +163,30 @@ def apply_retention_policy(client: WebDavClient, remote_dir: str):
                 backups.append({"name": name, "path": f['name'], "sort_key": name})
         
         backups.sort(key=lambda x: x['sort_key'], reverse=True)
-        logging.info(f"检查保留策略: 当前有 {len(backups)} 个备份, 限制为 {max_backups}")
-
+        
         if len(backups) > max_backups:
             to_delete = backups[max_backups:]
             for item in to_delete:
                 path_to_remove = item['path']
-                logging.info(f"正在删除过期备份: {path_to_remove}")
                 try:
                     client.remove(path_to_remove)
+                    logging.info(f"保留策略删除: {path_to_remove}")
                 except Exception as ex:
-                    logging.warning(f"删除失败 ({ex})，尝试修正路径重试...")
+                    # 路径兼容重试
                     try:
                         if not path_to_remove.startswith('/'): client.remove('/' + path_to_remove)
                         else: client.remove(path_to_remove.lstrip('/'))
-                    except Exception as ex2:
-                        logging.error(f"彻底无法删除文件 {path_to_remove}: {ex2}")
-            logging.info(f"清理完成，共删除了 {len(to_delete)} 个旧文件。")
+                    except: pass
     except Exception as e:
-        logging.error(f"保留策略清理过程出错: {e}")
+        logging.error(f"保留策略出错: {e}")
 
 # --- 核心备份逻辑 ---
 
 def perform_backup():
-    logging.info("开始执行定时备份任务...")
+    logging.info(">>> 开始执行备份任务")
     cfg = load_config()
     if not cfg.get("webdav_url"):
-        logging.warning("未配置 WebDAV，跳过备份。")
+        logging.warning("未配置 WebDAV，跳过备份")
         return
 
     tmp_files = []
@@ -191,24 +198,34 @@ def perform_backup():
         tar_path = os.path.join(TEMP_DIR, backup_name)
         tmp_files.append(tar_path)
 
-        # 1. 备份 SQLite (安全热备份)
-        sqlite_db_path = os.path.join(DATA_DIR, "db.sqlite3")
-        backup_db_path = os.path.join(TEMP_DIR, "db.sqlite3")
-        if os.path.exists(sqlite_db_path):
-            logging.info("正在导出 SQLite 数据库...")
-            subprocess.run(["sqlite3", sqlite_db_path, f".backup '{backup_db_path}'"], check=True)
-            tmp_files.append(backup_db_path)
+        # 1. 停止服务（确保数据一致性）
+        try:
+            stop_service()
+        except Exception as e:
+            logging.error(f"停止服务失败，中止备份: {e}")
+            return
 
-        # 2. 打包
-        logging.info("正在打包文件...")
-        with tarfile.open(tar_path, "w:gz") as tar:
-            if os.path.exists(backup_db_path):
-                tar.add(backup_db_path, arcname="db.sqlite3")
-            for item in ["attachments", "sends", "rsa_key.pem", "rsa_key.pub.pem", "config.json", "data.json", "icon_cache"]:
-                p = os.path.join(DATA_DIR, item)
-                if os.path.exists(p): tar.add(p, arcname=item)
+        # 2. 打包整个 /data 目录
+        try:
+            logging.info(f"正在打包 {DATA_DIR} 目录...")
+            with tarfile.open(tar_path, "w:gz") as tar:
+                # arcname="" 表示将 /data 下的内容直接放在压缩包根目录
+                # 这样解压时直接解压到 /data 即可
+                tar.add(DATA_DIR, arcname="")
+        except Exception as e:
+            logging.error(f"打包失败: {e}")
+            start_service() # 尝试恢复服务
+            raise e
         
-        # 3. 加密
+        # 3. 立即恢复服务（减少停机时间）
+        try:
+            start_service()
+        except Exception as e:
+            logging.error(f"服务启动失败! 请手动检查: {e}")
+            send_telegram_notify("严重错误：备份后服务无法自动启动！", success=False)
+            raise e
+
+        # 4. 加密 (耗时操作放在服务启动后)
         upload_path = tar_path
         if cfg.get("encryption_password"):
             logging.info("正在加密备份文件...")
@@ -216,45 +233,36 @@ def perform_backup():
             tmp_files.append(upload_path)
             backup_name += ".enc"
 
-        # 4. 上传
-        logging.info(f"正在上传到 WebDAV: {cfg['webdav_url']}")
+        # 5. 上传
+        logging.info("正在上传到 WebDAV...")
         client = WebDavClient(cfg["webdav_url"], auth=(cfg.get("webdav_user", ""), cfg.get("webdav_password", "")))
         remote_dir = cfg.get('webdav_path', '/')
         try:
             if remote_dir != "/" and not client.exists(remote_dir): client.mkdir(remote_dir)
-        except Exception as e: logging.warning(f"尝试创建目录失败: {e}")
+        except: pass
 
         remote_path = f"{remote_dir}/{backup_name}".replace("//", "/")
         client.upload_file(upload_path, remote_path)
-        logging.info("上传成功。")
+        logging.info("上传成功")
         
-        # 5. 保留策略
+        # 6. 保留策略
         apply_retention_policy(client, remote_dir)
-        logging.info(f"备份流程全部完成: {backup_name}")
+        logging.info(f"备份流程结束: {backup_name}")
 
     except Exception as e:
-        logging.error(f"备份流程失败: {e}", exc_info=True)
-        send_telegram_notify(f"备份流程发生异常: {str(e)}", success=False)
+        logging.error(f"备份流程异常: {e}", exc_info=True)
+        send_telegram_notify(f"备份失败: {str(e)}", success=False)
     finally:
+        # 清理临时文件
         for f in tmp_files:
             if os.path.exists(f):
-                try: 
-                    if os.path.isdir(f): shutil.rmtree(f)
-                    else: os.remove(f)
+                try: os.remove(f)
                 except: pass
 
 # --- 还原逻辑 ---
 
-def restart_vaultwarden():
-    logging.info("正在重启 Vaultwarden...")
-    try:
-        subprocess.run(["supervisorctl", "restart", "vaultwarden"], check=True)
-        logging.info("Vaultwarden 重启命令已发送。")
-    except subprocess.CalledProcessError as e:
-        logging.error(f"重启 Vaultwarden 失败: {e}")
-        raise e
-
 def process_restore_file(local_file_path: str):
+    logging.info(">>> 开始执行还原任务")
     cfg = load_config()
     temp_restored_files = []
     
@@ -269,40 +277,51 @@ def process_restore_file(local_file_path: str):
             work_file = decrypt_file(local_file_path, cfg["encryption_password"])
             temp_restored_files.append(work_file)
         
-        # 2. 解压
-        logging.info("正在解压覆盖数据...")
+        # 2. 校验
         if not tarfile.is_tarfile(work_file):
-            raise ValueError("文件不是有效的 tar 归档")
+            raise ValueError("无效的备份文件")
 
-        # 停止服务以安全写入
-        subprocess.run(["supervisorctl", "stop", "vaultwarden"], check=False)
+        # 3. 停止服务
+        try:
+            stop_service()
+        except Exception as e:
+            logging.error(f"停止服务失败: {e}")
+            raise e
 
-        # 【核心修复】清理 WAL/SHM 文件，防止 SQLite 数据库损坏
-        logging.info("正在清理旧的 WAL/SHM 缓存文件...")
-        for ext in ["-wal", "-shm"]:
-            wal_file = os.path.join(DATA_DIR, "db.sqlite3" + ext)
-            if os.path.exists(wal_file):
-                try:
-                    os.remove(wal_file)
-                    logging.info(f"已删除旧缓存: {wal_file}")
-                except Exception as e:
-                    logging.error(f"删除 {wal_file} 失败: {e}")
+        # 4. 清空 /data 目录 (危险操作，需谨慎)
+        logging.info(f"正在清空数据目录 {DATA_DIR} ...")
+        for filename in os.listdir(DATA_DIR):
+            file_path = os.path.join(DATA_DIR, filename)
+            try:
+                if os.path.isfile(file_path) or os.path.islink(file_path):
+                    os.unlink(file_path)
+                elif os.path.isdir(file_path):
+                    shutil.rmtree(file_path)
+            except Exception as e:
+                logging.error(f"删除 {file_path} 失败: {e}")
 
-        # 解压覆盖
+        # 5. 解压还原
+        logging.info("正在解压备份文件...")
         with tarfile.open(work_file, "r:gz") as tar:
+            # 这里的解压路径直接是 DATA_DIR
             tar.extractall(path=DATA_DIR)
         
-        logging.info("数据覆盖完成。")
+        logging.info("数据目录已替换完成")
 
-        # 3. 重启
-        restart_vaultwarden()
-        logging.info("系统已成功从备份还原并重启。")
+        # 6. 启动服务
+        try:
+            start_service()
+            logging.info("还原完成，服务已重启")
+        except Exception as e:
+            logging.error(f"服务启动失败: {e}")
+            raise e
 
     except Exception as e:
         logging.error(f"还原失败: {e}", exc_info=True)
-        send_telegram_notify(f"还原操作失败: {str(e)}", success=False)
-        # 尝试恢复服务
-        subprocess.run(["supervisorctl", "start", "vaultwarden"], check=False)
+        send_telegram_notify(f"还原失败: {str(e)}", success=False)
+        # 尝试保底启动
+        try: start_service() 
+        except: pass
     finally:
         if os.path.exists(local_file_path): os.remove(local_file_path)
         for f in temp_restored_files:
@@ -313,14 +332,14 @@ def download_and_restore(filename: str):
     local_filename = os.path.basename(filename)
     local_path = os.path.join(TEMP_DIR, local_filename)
     try:
-        logging.info(f"开始下载备份文件: {filename}")
+        logging.info(f"开始下载: {filename}")
         client = WebDavClient(cfg["webdav_url"], auth=(cfg.get("webdav_user", ""), cfg.get("webdav_password", "")))
         remote_path = f"{cfg.get('webdav_path', '/')}/{local_filename}".replace("//", "/")
         client.download_file(remote_path, local_path)
         process_restore_file(local_path)
     except Exception as e:
-        logging.error(f"下载/还原过程出错: {e}")
-        send_telegram_notify(f"下载/还原过程出错: {e}", success=False)
+        logging.error(f"下载/还原出错: {e}")
+        send_telegram_notify(f"下载/还原出错: {e}", success=False)
 
 # --- 调度器设置 ---
 
@@ -331,9 +350,8 @@ def schedule_backup_job(config: dict):
     try:
         trigger = CronTrigger.from_crontab(cron_exp, timezone=TZ_CN)
         scheduler.add_job(perform_backup, trigger, id='backup_job', replace_existing=True)
-        logging.info(f"备份任务已更新，Cron: {cron_exp}")
-    except ValueError as e:
-        logging.error(f"Cron 表达式错误: {cron_exp}, 使用默认值")
+        logging.info(f"调度更新: {cron_exp}")
+    except:
         scheduler.add_job(perform_backup, CronTrigger(hour=3, minute=0, timezone=TZ_CN), id='backup_job', replace_existing=True)
 
 scheduler.start()

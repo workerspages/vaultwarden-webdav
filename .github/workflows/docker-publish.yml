@@ -10,7 +10,7 @@ on:
 
 env:
   # 替换成你的 DockerHub 用户名/镜像名
-  IMAGE_NAME: your_dockerhub_username/vaultwarden-extended
+  IMAGE_NAME: yesyunxin/vaultwarden-webdav
   GHCR_IMAGE_NAME: ghcr.io/${{ github.repository }}
 
 jobs:

@@ -182,15 +182,21 @@ def parse_backup_date(filename: str) -> Optional[datetime.datetime]:
 def apply_retention_policy(client: WebDavClient, remote_dir: str):
     """应用 GFS 策略清理旧备份"""
     try:
-        files = client.ls(remote_dir)
+        # 注意：webdav4 的 ls 默认可能只返回名字，必须加 detail=True 才能获取完整字典信息
+        files = client.ls(remote_dir, detail=True)
         backups = []
         
         # 筛选并解析备份文件
         for f in files:
-            if "vw_backup_" in f['name']:
-                dt = parse_backup_date(f['name'])
+            # f 是一个字典，包含 name, size, type 等
+            if f['type'] == 'directory':
+                continue
+                
+            name = f['name']
+            if "vw_backup_" in name:
+                dt = parse_backup_date(name)
                 if dt:
-                    backups.append({"name": f['name'], "dt": dt, "path": f['name']})
+                    backups.append({"name": name, "dt": dt, "path": name})
         
         # 按时间倒序排列（最新的在前面）
         backups.sort(key=lambda x: x['dt'], reverse=True)
@@ -300,14 +306,18 @@ def perform_backup():
         )
         
         remote_dir = cfg.get('webdav_path', '/')
+        # 确保远程目录存在
         try:
             if remote_dir != "/":
-                client.mkdir(remote_dir)
-        except:
-            pass
-            
+                if not client.exists(remote_dir):
+                    client.mkdir(remote_dir)
+        except Exception as e:
+             logging.warning(f"尝试创建目录失败(可能已存在或权限不足): {e}")
+
         remote_path = f"{remote_dir}/{backup_name}".replace("//", "/")
-        client.upload(upload_path, remote_path)
+        
+        # 【修正】webdav4 使用 upload_file 方法
+        client.upload_file(upload_path, remote_path)
         logging.info("上传成功。")
         
         # 5. 执行 GFS 保留策略
@@ -395,7 +405,9 @@ def download_and_restore(filename: str):
             auth=(cfg.get("webdav_user", ""), cfg.get("webdav_password", ""))
         )
         remote_path = f"{cfg.get('webdav_path', '/')}/{filename}".replace("//", "/")
-        client.download(remote_path, local_path)
+        
+        # 【修正】webdav4 使用 download_file 方法
+        client.download_file(remote_path, local_path)
         
         process_restore_file(local_path)
     except Exception as e:
@@ -471,11 +483,13 @@ async def list_backups():
             cfg["webdav_url"], 
             auth=(cfg.get("webdav_user", ""), cfg.get("webdav_password", ""))
         )
-        files = client.ls(cfg.get('webdav_path', '/'))
+        # 【修正】必须加上 detail=True 才能返回包含 name, size 等信息的字典列表
+        files = client.ls(cfg.get('webdav_path', '/'), detail=True)
         
         backup_files = []
         for f in files:
-            if "vw_backup_" in f['name']:
+            # 确保是文件且名字包含 vw_backup_
+            if f.get('type') != 'directory' and "vw_backup_" in f.get('name', ''):
                 size_mb = round(int(f.get('size', 0)) / 1024 / 1024, 2)
                 backup_files.append({
                     "name": f['name'],

@@ -114,9 +114,6 @@ def send_telegram_notify(msg: str, success: bool = True):
     if not token or not chat_id:
         return
     
-    # 【修改点】如果是成功消息，且不在调试模式下，可以选择不发送
-    # 但由于需求是“仅失败发送”，我们在调用端控制，这里只负责发
-    
     emoji = "✅" if success else "❌"
     title = "Vaultwarden 备份成功" if success else "Vaultwarden 备份/还原失败"
     text = f"{emoji} *{title}*\n\n{msg}\n\n🕒 时间: {datetime.datetime.now(TZ_CN).strftime('%Y-%m-%d %H:%M:%S')}"
@@ -154,7 +151,7 @@ def decrypt_file(file_path: str, password: str) -> str:
         f.write(decrypted_data)
     return out_path
 
-# --- 保留策略逻辑 (已修复 WebDAV 路径拼接问题) ---
+# --- 保留策略逻辑 ---
 
 def apply_retention_policy(client: WebDavClient, remote_dir: str):
     """应用保留策略：保留最新的 N 个备份，删除旧的"""
@@ -170,18 +167,15 @@ def apply_retention_policy(client: WebDavClient, remote_dir: str):
             if f['type'] == 'directory':
                 continue
             
-            # WebDAV ls 返回的 f['name'] 通常包含完整路径 (例如 /folder/file.tar.gz)
-            # 我们只用 basename 来判断是不是备份文件
             name = os.path.basename(f['name'])
             
             if "vw_backup_" in name:
                 backups.append({
                     "name": name, 
-                    "path": f['name'], # 【关键】保留 ls 返回的原始路径用于删除
+                    "path": f['name'], 
                     "sort_key": name 
                 })
         
-        # 按名称降序 (最新在最前)
         backups.sort(key=lambda x: x['sort_key'], reverse=True)
         
         logging.info(f"检查保留策略: 当前有 {len(backups)} 个备份, 限制为 {max_backups}")
@@ -190,14 +184,12 @@ def apply_retention_policy(client: WebDavClient, remote_dir: str):
             to_delete = backups[max_backups:]
             
             for item in to_delete:
-                # 【修复】直接使用 ls 返回的路径，不要重复拼接 remote_dir
                 path_to_remove = item['path']
                 
                 logging.info(f"正在删除过期备份: {path_to_remove}")
                 try:
                     client.remove(path_to_remove)
                 except Exception as ex:
-                    # 如果直接删除失败，尝试加前导斜杠（针对某些特殊的 WebDAV 服务端）
                     logging.warning(f"删除失败 ({ex})，尝试修正路径重试...")
                     try:
                         if not path_to_remove.startswith('/'):
@@ -282,12 +274,10 @@ def perform_backup():
         logging.info("正在检查保留策略...")
         apply_retention_policy(client, remote_dir)
 
-        # 【修改】成功时不发送通知，仅记录日志
         logging.info(f"备份流程全部完成: {backup_name}")
 
     except Exception as e:
         logging.error(f"备份流程失败: {e}", exc_info=True)
-        # 【修改】仅失败时发送通知
         send_telegram_notify(f"备份流程发生异常: {str(e)}", success=False)
     finally:
         for f in tmp_files:
@@ -302,7 +292,6 @@ def perform_backup():
 def restart_vaultwarden():
     logging.info("正在重启 Vaultwarden...")
     try:
-        # 确保 supervisorctl 使用 sock 文件配置 (参考之前的 supervisord.conf 修改)
         subprocess.run(["supervisorctl", "restart", "vaultwarden"], check=True)
         logging.info("Vaultwarden 重启命令已发送。")
     except subprocess.CalledProcessError as e:
@@ -338,12 +327,10 @@ def process_restore_file(local_file_path: str):
 
         # 3. 重启
         restart_vaultwarden()
-        # 【修改】成功时不发送通知
         logging.info("系统已成功从备份还原并重启。")
 
     except Exception as e:
         logging.error(f"还原失败: {e}", exc_info=True)
-        # 【修改】仅失败时发送通知
         send_telegram_notify(f"还原操作失败: {str(e)}", success=False)
         subprocess.run(["supervisorctl", "start", "vaultwarden"], check=False)
     finally:
@@ -363,8 +350,6 @@ def download_and_restore(filename: str):
             auth=(cfg.get("webdav_user", ""), cfg.get("webdav_password", ""))
         )
         
-        # 这里的 filename 可能是前端传来的纯文件名，也可能是 list_backups 返回的
-        # 为了保险，我们重新拼装远程路径
         remote_path = f"{cfg.get('webdav_path', '/')}/{local_filename}".replace("//", "/")
         
         client.download_file(remote_path, local_path)
@@ -445,14 +430,26 @@ async def list_backups():
             cfg["webdav_url"], 
             auth=(cfg.get("webdav_user", ""), cfg.get("webdav_password", ""))
         )
-        # detail=True 获取完整信息
         files = client.ls(cfg.get('webdav_path', '/'), detail=True)
         
         backup_files = []
         for f in files:
             if f.get('type') != 'directory' and "vw_backup_" in f.get('name', ''):
                 clean_name = os.path.basename(f['name'])
-                size_mb = round(int(f.get('size', 0)) / 1024 / 1024, 2)
+                
+                # --- 修复：更健壮的大小获取逻辑 ---
+                raw_size = f.get('size')
+                if raw_size is None:
+                    raw_size = f.get('content_length')
+                
+                try:
+                    size_bytes = int(raw_size) if raw_size is not None else 0
+                except (ValueError, TypeError):
+                    size_bytes = 0
+                
+                size_mb = round(size_bytes / 1024 / 1024, 2)
+                # --------------------------------
+                
                 backup_files.append({
                     "name": clean_name,
                     "size": f"{size_mb} MB",

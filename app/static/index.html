@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Vaultwarden WebDAV 管理面板</title>
+    <title>Vaultwarden 管理面板</title>
     <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
     <link rel="stylesheet" href="https://unpkg.com/element-plus/dist/index.css" />
     <script src="https://unpkg.com/element-plus"></script>
@@ -16,7 +16,6 @@
         .login-container { min-height: 100vh; display: flex; align-items: center; justify-content: center; background: linear-gradient(135deg, #101828 0%, #3b82f6 100%); }
         .fade-in { animation: fadeIn 0.5s ease-in-out; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-        /* 修复表格内边距，让列表更紧凑美观 */
         .el-table .el-table__cell { padding: 8px 0; }
     </style>
 </head>
@@ -28,7 +27,7 @@
                 <template #header>
                     <div class="text-center">
                         <h2 class="text-2xl font-bold text-gray-800">系统登录</h2>
-                        <p class="text-gray-500 text-sm mt-1">Vaultwarden Backup WebDAV</p>
+                        <p class="text-gray-500 text-sm mt-1">Vaultwarden Backup Admin</p>
                     </div>
                 </template>
                 <el-form label-position="top" size="large" @submit.prevent="login">
@@ -72,10 +71,11 @@
                                     :on-success="handleUploadSuccess" 
                                     :on-error="handleUploadError" 
                                     :show-file-list="false" 
-                                    accept=".tar.gz,.enc">
-                                    <el-button type="warning" size="large" class="w-full h-12" icon="RefreshLeft">上传文件还原</el-button>
+                                    accept=".zip">
+                                    <el-button type="warning" size="large" class="w-full h-12" icon="RefreshLeft">上传 Zip 还原</el-button>
                                 </el-upload>
                             </div>
+                            <p class="text-xs text-gray-400 text-center">支持上传 .zip 文件进行覆盖还原 (若有密码会自动解密)</p>
                         </div>
                     </el-card>
 
@@ -123,7 +123,7 @@
                                 <el-input v-model="config.webdav_path" placeholder="/vaultwarden-backups"></el-input>
                             </el-form-item>
                             <el-form-item label="备份加密密码">
-                                <el-input type="password" v-model="config.encryption_password" show-password placeholder="若设置，备份文件将被 AES 加密"></el-input>
+                                <el-input type="password" v-model="config.encryption_password" show-password placeholder="若设置，将使用 AES-256 加密 Zip"></el-input>
                             </el-form-item>
                             
                             <el-divider content-position="left">通知 (Telegram)</el-divider>
@@ -152,7 +152,6 @@
                         </template>
                         <div class="max-h-96 overflow-y-auto">
                             <el-table :data="backups" style="width: 100%" :show-header="false" empty-text="暂无数据">
-                                <!-- 文件名列 -->
                                 <el-table-column min-width="160">
                                     <template #default="scope">
                                         <div class="flex flex-col">
@@ -161,15 +160,11 @@
                                         </div>
                                     </template>
                                 </el-table-column>
-                                
-                                <!-- 【UI修复】文件大小列：增加宽度，强制不换行 -->
                                 <el-table-column width="100" align="right">
                                     <template #default="scope">
                                         <span class="text-xs bg-gray-100 px-2 py-1 rounded whitespace-nowrap">{{ scope.row.size }}</span>
                                     </template>
                                 </el-table-column>
-                                
-                                <!-- 操作按钮列 -->
                                 <el-table-column width="60" align="center">
                                     <template #default="scope">
                                         <el-popconfirm title="危险：确定还原此备份？服务将重启。" width="200" @confirm="restore(scope.row.name)">

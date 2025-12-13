@@ -1,23 +1,22 @@
 version: '3'
+
 services:
   vaultwarden:
     image: ghcr.io/workerspages/vaultwarden-webdav:latest
     container_name: vaultwarden
-    restart: always
+    restart: unless-stopped
     volumes:
-      - ./vw-data:/data
-      - ./vw-conf:/conf
+      - ./vw-data:/data  # Vaultwarden 的核心数据（数据库、密钥、附件等）
+      - ./vw-conf:/conf  # 备份面板的配置文件和日志
+    # 环境变量配置
     environment:
-      # 时区
-      - TZ=Asia/Shanghai
-      # Vaultwarden 基础配置
-      - WEBSOCKET_ENABLED=true 
+      - TZ=Asia/Shanghai            # 设置时区（非常重要，影响定时备份时间）
+      - WEBSOCKET_ENABLED=true      # 开启 WebSocket 支持
+      - SIGNUPS_ALLOWED=false       # 禁止新用户注册（建议设为 false）
       
-      # ---【面板登录配置】---
-      # 如果不设置，默认为 admin / admin
-      - DASHBOARD_ADMIN_USER=myuser
-      - DASHBOARD_ADMIN_PASSWORD=mypassword123
-      
+      # --- 面板登录账号设置 ---
+      - DASHBOARD_ADMIN_USER=admin      # 自定义面板用户名
+      - DASHBOARD_ADMIN_PASSWORD=admin  # 自定义面板密码
     ports:
-      - "8080:80"    # Vaultwarden 主服务
-      - "5000:5000"  # 备份管理面板
+      - "8080:80"    # Vaultwarden 服务端口 (浏览器访问密码库)
+      - "5000:5000"  # 备份管理面板端口 (浏览器访问配置后台)

@@ -4,216 +4,515 @@ import tarfile
 import datetime
 import logging
 import json
-from fastapi import FastAPI, UploadFile, BackgroundTasks
+import subprocess
+import base64
+import hashlib
+from typing import List, Dict, Optional
+
+# 第三方库
+import httpx
+from fastapi import FastAPI, UploadFile, BackgroundTasks, HTTPException, File
 from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 from webdav4.client import Client as WebDavClient
 from cryptography.fernet import Fernet
-import httpx
-import subprocess
+from pytz import timezone
 
-# 配置路径
+# --- 全局配置与常量 ---
+
 DATA_DIR = "/data"
 CONF_DIR = "/conf"
 BACKUP_CONFIG_FILE = os.path.join(CONF_DIR, "backup_config.json")
+LOG_FILE = os.path.join(CONF_DIR, "manager.log")
 TEMP_DIR = "/tmp/backup_work"
+TZ_CN = timezone('Asia/Shanghai')
 
-app = FastAPI()
+# 确保必要目录存在
+os.makedirs(CONF_DIR, exist_ok=True)
 os.makedirs(TEMP_DIR, exist_ok=True)
 
 # 日志配置
-logging.basicConfig(filename=os.path.join(CONF_DIR, "manager.log"), level=logging.INFO)
+logging.basicConfig(
+    filename=LOG_FILE,
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+# 同时输出到控制台以便 docker logs 查看
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+logging.getLogger().addHandler(console_handler)
 
-# --- 辅助函数 ---
+app = FastAPI(title="Vaultwarden Dashboard")
 
-def load_config():
+# 允许跨域（方便开发调试，生产环境同源无影响）
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# --- 辅助功能函数 ---
+
+def load_config() -> dict:
+    """加载配置文件"""
     if os.path.exists(BACKUP_CONFIG_FILE):
-        with open(BACKUP_CONFIG_FILE, 'r') as f:
-            return json.load(f)
+        try:
+            with open(BACKUP_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            logging.error(f"加载配置失败: {e}")
     return {}
 
-def save_config(config):
-    with open(BACKUP_CONFIG_FILE, 'w') as f:
-        json.dump(config, f, indent=4)
+def save_config(config: dict):
+    """保存配置文件，并尝试更新调度任务"""
+    with open(BACKUP_CONFIG_FILE, 'w', encoding='utf-8') as f:
+        json.dump(config, f, indent=4, ensure_ascii=False)
+    
+    # 尝试重新调度
+    try:
+        schedule_backup_job(config)
+    except Exception as e:
+        logging.error(f"更新调度任务失败: {e}")
 
-def send_telegram_notify(msg, success=True):
+def get_current_time_str():
+    """获取当前北京时间字符串"""
+    return datetime.datetime.now(TZ_CN).strftime("%Y%m%d_%H%M%S")
+
+def send_telegram_notify(msg: str, success: bool = True):
+    """发送 Telegram 通知"""
     cfg = load_config()
     token = cfg.get("tg_bot_token")
     chat_id = cfg.get("tg_chat_id")
+    
     if not token or not chat_id:
         return
     
     emoji = "✅" if success else "❌"
-    text = f"{emoji} **Vaultwarden 备份通知**\n\n{msg}"
+    title = "Vaultwarden 备份成功" if success else "Vaultwarden 备份/还原失败"
+    text = f"{emoji} *{title}*\n\n{msg}\n\n🕒 时间: {datetime.datetime.now(TZ_CN).strftime('%Y-%m-%d %H:%M:%S')}"
+    
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     try:
-        httpx.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
+        httpx.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}, timeout=10)
     except Exception as e:
-        logging.error(f"Telegram send failed: {e}")
+        logging.error(f"Telegram 发送失败: {e}")
 
-def get_fernet_key(password: str):
-    # 简单根据密码生成 key (实际生产建议用 PBKDF2，这里为了演示简化)
-    import base64
-    from cryptography.hazmat.primitives import hashes
-    digest = hashes.Hash(hashes.SHA256())
-    digest.update(password.encode())
-    return base64.urlsafe_b64encode(digest.finalize())
+def get_fernet_key(password: str) -> bytes:
+    """根据密码生成固定的 AES Key (使用 SHA256 派生)"""
+    digest = hashlib.sha256(password.encode()).digest()
+    return base64.urlsafe_b64encode(digest)
 
-def encrypt_file(file_path, password):
+def encrypt_file(file_path: str, password: str) -> str:
+    """加密文件，返回新路径 (.enc)"""
     key = get_fernet_key(password)
     fernet = Fernet(key)
+    
     with open(file_path, 'rb') as f:
         data = f.read()
-    encrypted = fernet.encrypt(data)
-    with open(file_path + ".enc", 'wb') as f:
-        f.write(encrypted)
-    return file_path + ".enc"
-
-def decrypt_file(file_path, password):
-    key = get_fernet_key(password)
-    fernet = Fernet(key)
-    with open(file_path, 'rb') as f:
-        data = f.read()
-    decrypted = fernet.decrypt(data)
-    out_path = file_path.replace(".enc", "")
+    
+    encrypted_data = fernet.encrypt(data)
+    out_path = file_path + ".enc"
+    
     with open(out_path, 'wb') as f:
-        f.write(decrypted)
+        f.write(encrypted_data)
+        
     return out_path
+
+def decrypt_file(file_path: str, password: str) -> str:
+    """解密文件，返回去除了 .enc 的路径"""
+    key = get_fernet_key(password)
+    fernet = Fernet(key)
+    
+    with open(file_path, 'rb') as f:
+        data = f.read()
+    
+    decrypted_data = fernet.decrypt(data)
+    out_path = file_path.replace(".enc", "")
+    
+    with open(out_path, 'wb') as f:
+        f.write(decrypted_data)
+        
+    return out_path
+
+# --- GFS (Grandfather-Father-Son) 保留策略逻辑 ---
+
+def parse_backup_date(filename: str) -> Optional[datetime.datetime]:
+    """从文件名解析日期 vw_backup_YYYYMMDD_HHMMSS"""
+    try:
+        # 假设格式如: vw_backup_20231001_120000.tar.gz.enc
+        base = filename.split('.')[0] # 去掉后缀
+        # 提取 vw_backup_ 后面的部分
+        parts = base.split('_')
+        if len(parts) >= 3:
+            date_str = f"{parts[2]}_{parts[3]}"
+            dt = datetime.datetime.strptime(date_str, "%Y%m%d_%H%M%S")
+            return dt.replace(tzinfo=TZ_CN)
+    except Exception:
+        return None
+    return None
+
+def apply_retention_policy(client: WebDavClient, remote_dir: str):
+    """应用 GFS 策略清理旧备份"""
+    try:
+        files = client.ls(remote_dir)
+        backups = []
+        
+        # 筛选并解析备份文件
+        for f in files:
+            if "vw_backup_" in f['name']:
+                dt = parse_backup_date(f['name'])
+                if dt:
+                    backups.append({"name": f['name'], "dt": dt, "path": f['name']}) # webdav4 ls returns name relative or full path depending on impl, usually name
+        
+        # 按时间倒序排列（最新的在前面）
+        backups.sort(key=lambda x: x['dt'], reverse=True)
+        
+        if not backups:
+            return
+
+        now = datetime.datetime.now(TZ_CN)
+        to_keep = set()
+        to_delete = set()
+
+        # 策略定义
+        keep_days = 7
+        keep_weeks = 4
+        keep_months = 12
+
+        # 1. 保留最近 7 天的所有备份
+        for b in backups:
+            if (now - b['dt']).days < keep_days:
+                to_keep.add(b['name'])
+
+        # 2. 保留最近 4 周（每周一份，取该周最新的）
+        # 逻辑：按周分组，每组取第一个
+        for i in range(keep_weeks):
+            # 这周的起始时间范围
+            start_window = now - datetime.timedelta(weeks=i+1)
+            end_window = now - datetime.timedelta(weeks=i)
+            # 在此窗口内找到最新的一个备份
+            candidates = [b for b in backups if start_window <= b['dt'] < end_window]
+            if candidates:
+                to_keep.add(candidates[0]['name'])
+
+        # 3. 保留最近 12 个月（每月一份，取该月最新的）
+        for i in range(keep_months):
+             # 简单估算一个月30天，防止复杂的日历计算
+            start_window = now - datetime.timedelta(days=(i+1)*30)
+            end_window = now - datetime.timedelta(days=i*30)
+            candidates = [b for b in backups if start_window <= b['dt'] < end_window]
+            if candidates:
+                to_keep.add(candidates[0]['name'])
+
+        # 标记删除
+        for b in backups:
+            if b['name'] not in to_keep:
+                to_delete.add(b['name'])
+
+        # 执行删除
+        for name in to_delete:
+            full_path = f"{remote_dir}/{name}".replace("//", "/")
+            logging.info(f"GFS 策略清理: 删除 {name}")
+            client.remove(full_path)
+            
+    except Exception as e:
+        logging.error(f"GFS 清理过程出错: {e}")
 
 # --- 核心备份逻辑 ---
 
 def perform_backup():
+    """执行完整的备份流程"""
+    logging.info("开始执行定时备份任务...")
     cfg = load_config()
+    
     if not cfg.get("webdav_url"):
-        logging.warning("Backup skipped: No WebDAV config")
+        logging.warning("未配置 WebDAV，跳过备份。")
         return
 
+    tmp_files = []
+    backup_name = ""
+
     try:
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = get_current_time_str()
         backup_name = f"vw_backup_{timestamp}.tar.gz"
         tar_path = os.path.join(TEMP_DIR, backup_name)
+        tmp_files.append(tar_path)
 
-        # 1. 备份 SQLite (安全方式)
-        sqlite_db = os.path.join(DATA_DIR, "db.sqlite3")
-        backup_db = os.path.join(TEMP_DIR, "db.sqlite3")
-        if os.path.exists(sqlite_db):
-            subprocess.run(["sqlite3", sqlite_db, f".backup '{backup_db}'"], check=True)
+        # 1. 备份 SQLite 数据库 (使用 sqlite3 命令行热备份，避免锁死)
+        sqlite_db_path = os.path.join(DATA_DIR, "db.sqlite3")
+        backup_db_path = os.path.join(TEMP_DIR, "db.sqlite3")
         
-        # 2. 打包
+        if os.path.exists(sqlite_db_path):
+            logging.info("正在导出 SQLite 数据库...")
+            subprocess.run(["sqlite3", sqlite_db_path, f".backup '{backup_db_path}'"], check=True)
+            tmp_files.append(backup_db_path)
+        else:
+            logging.warning("未找到 db.sqlite3，可能是首次运行。")
+
+        # 2. 打包文件
+        logging.info("正在打包文件...")
         with tarfile.open(tar_path, "w:gz") as tar:
-            if os.path.exists(backup_db):
-                tar.add(backup_db, arcname="db.sqlite3")
-            # 添加 attachments, sends, rsa_keys 等
-            for item in ["attachments", "sends", "rsa_key.pem", "rsa_key.pub.pem", "config.json"]:
+            # 添加刚刚备份的数据库
+            if os.path.exists(backup_db_path):
+                tar.add(backup_db_path, arcname="db.sqlite3")
+            
+            # 添加其他关键数据 (附件、配置、密钥)
+            # data.json (旧版) 或 config.json (新版)
+            for item in ["attachments", "sends", "rsa_key.pem", "rsa_key.pub.pem", "config.json", "data.json", "icon_cache"]:
                 p = os.path.join(DATA_DIR, item)
                 if os.path.exists(p):
                     tar.add(p, arcname=item)
         
-        # 3. 加密
+        # 3. 加密 (如果配置了密码)
         upload_path = tar_path
         if cfg.get("encryption_password"):
+            logging.info("正在加密备份文件...")
             upload_path = encrypt_file(tar_path, cfg["encryption_password"])
+            tmp_files.append(upload_path)
             backup_name += ".enc"
 
-        # 4. 上传 WebDAV
-        client = WebDavClient(cfg["webdav_url"], auth=(cfg["webdav_user"], cfg["webdav_password"]))
-        remote_path = f"{cfg.get('webdav_path', '/')}/{backup_name}".replace("//", "/")
+        # 4. 上传到 WebDAV
+        logging.info(f"正在上传到 WebDAV: {cfg['webdav_url']}")
+        client = WebDavClient(
+            cfg["webdav_url"], 
+            auth=(cfg.get("webdav_user", ""), cfg.get("webdav_password", ""))
+        )
+        
+        remote_dir = cfg.get('webdav_path', '/')
+        # 确保远程目录存在 (如果库支持 mkdirs)
+        try:
+            if remote_dir != "/":
+                client.mkdir(remote_dir)
+        except:
+            pass # 目录可能已存在
+            
+        remote_path = f"{remote_dir}/{backup_name}".replace("//", "/")
         client.upload(upload_path, remote_path)
+        logging.info("上传成功。")
         
-        # 5. GFS 策略清理 (简化版: 仅演示保留最近 N 个，完整 GFS 需解析文件名日期)
-        # 获取列表 -> 按时间排序 -> 删除旧的
-        files = client.ls(cfg.get('webdav_path', '/'))
-        backups = [f for f in files if "vw_backup_" in f['name']]
-        # 这里需要更复杂的逻辑来实现完整的 GFS，此处略去以节省篇幅，仅做简单轮替
-        # 实际代码中应根据文件名时间戳判断是保留(Daily/Weekly/Monthly)
-        
-        send_telegram_notify(f"备份成功: {backup_name}")
+        # 5. 执行 GFS 保留策略
+        logging.info("正在执行 GFS 保留策略...")
+        apply_retention_policy(client, remote_dir)
+
+        send_telegram_notify(f"备份文件已上传: {backup_name}\nGFS 策略检查完成。")
 
     except Exception as e:
-        logging.error(f"Backup failed: {e}")
-        send_telegram_notify(f"备份失败: {str(e)}", success=False)
+        logging.error(f"备份流程失败: {e}", exc_info=True)
+        send_telegram_notify(f"备份流程发生异常: {str(e)}", success=False)
     finally:
         # 清理临时文件
-        if os.path.exists(TEMP_DIR):
-            shutil.rmtree(TEMP_DIR)
-        os.makedirs(TEMP_DIR, exist_ok=True)
+        for f in tmp_files:
+            if os.path.exists(f):
+                try:
+                    if os.path.isdir(f): shutil.rmtree(f)
+                    else: os.remove(f)
+                except:
+                    pass
 
-# --- 调度器 ---
-scheduler = BackgroundScheduler()
-scheduler.add_job(perform_backup, 'interval', hours=24) # 默认每天，可通过 API 修改
+# --- 还原逻辑 ---
+
+def restart_vaultwarden():
+    """重启 Vaultwarden 进程"""
+    logging.info("正在重启 Vaultwarden...")
+    try:
+        subprocess.run(["supervisorctl", "restart", "vaultwarden"], check=True)
+        logging.info("Vaultwarden 重启命令已发送。")
+    except subprocess.CalledProcessError as e:
+        logging.error(f"重启 Vaultwarden 失败: {e}")
+        raise e
+
+def process_restore_file(local_file_path: str):
+    """处理还原文件的核心逻辑：解密 -> 解压 -> 覆盖 -> 重启"""
+    cfg = load_config()
+    temp_restored_files = [] # 用于追踪解压的临时文件(如果是加密的话)
+    
+    try:
+        work_file = local_file_path
+
+        # 1. 解密
+        if local_file_path.endswith(".enc"):
+            if not cfg.get("encryption_password"):
+                raise ValueError("文件已加密，但未配置解密密码！")
+            logging.info("正在解密文件...")
+            work_file = decrypt_file(local_file_path, cfg["encryption_password"])
+            temp_restored_files.append(work_file)
+        
+        # 2. 解压并覆盖
+        logging.info("正在解压覆盖数据...")
+        if not tarfile.is_tarfile(work_file):
+            raise ValueError("文件不是有效的 tar 归档")
+
+        # 停止 Vaultwarden 以防止数据库写入冲突 (可选，但推荐)
+        subprocess.run(["supervisorctl", "stop", "vaultwarden"], check=False)
+
+        with tarfile.open(work_file, "r:gz") as tar:
+            # 也可以在这里做一些安全检查，防止路径遍历攻击
+            tar.extractall(path=DATA_DIR)
+        
+        logging.info("数据覆盖完成。")
+
+        # 3. 重启服务
+        restart_vaultwarden()
+        send_telegram_notify("系统已成功从备份还原并重启。")
+
+    except Exception as e:
+        logging.error(f"还原失败: {e}", exc_info=True)
+        send_telegram_notify(f"还原操作失败: {str(e)}", success=False)
+        # 尝试重启服务以恢复可用性
+        subprocess.run(["supervisorctl", "start", "vaultwarden"], check=False)
+    finally:
+        # 清理
+        if os.path.exists(local_file_path):
+            os.remove(local_file_path)
+        for f in temp_restored_files:
+            if os.path.exists(f):
+                os.remove(f)
+
+def download_and_restore(filename: str):
+    """后台任务：从 WebDAV 下载并还原"""
+    cfg = load_config()
+    local_path = os.path.join(TEMP_DIR, filename)
+    
+    try:
+        logging.info(f"开始下载备份文件: {filename}")
+        client = WebDavClient(
+            cfg["webdav_url"], 
+            auth=(cfg.get("webdav_user", ""), cfg.get("webdav_password", ""))
+        )
+        remote_path = f"{cfg.get('webdav_path', '/')}/{filename}".replace("//", "/")
+        client.download(remote_path, local_path)
+        
+        process_restore_file(local_path)
+    except Exception as e:
+        logging.error(f"下载/还原过程出错: {e}")
+        send_telegram_notify(f"下载/还原过程出错: {e}", success=False)
+
+# --- 调度器设置 ---
+
+# 初始化调度器，指定时区为上海
+scheduler = BackgroundScheduler(timezone=TZ_CN)
+
+def schedule_backup_job(config: dict):
+    """根据配置更新调度任务"""
+    # 移除旧任务
+    if scheduler.get_job('backup_job'):
+        scheduler.remove_job('backup_job')
+    
+    # 获取配置的时间，默认为凌晨 03:00
+    hour = int(config.get('schedule_hour', 3))
+    minute = int(config.get('schedule_minute', 0))
+    
+    # 添加 Cron 任务
+    scheduler.add_job(
+        perform_backup, 
+        CronTrigger(hour=hour, minute=minute, timezone=TZ_CN), 
+        id='backup_job',
+        replace_existing=True
+    )
+    logging.info(f"备份任务已调度: 每天 {hour:02d}:{minute:02d}")
+
+# 启动时加载配置并运行调度器
 scheduler.start()
+initial_cfg = load_config()
+schedule_backup_job(initial_cfg)
 
-# --- API 接口 ---
 
-@app.get("/")
-def read_root():
-    with open("app/static/index.html", "r", encoding="utf-8") as f:
-        return HTMLResponse(f.read())
+# --- API 路由定义 ---
+
+@app.get("/", response_class=HTMLResponse)
+async def read_root():
+    """返回前端页面"""
+    index_path = "/app/static/index.html" # 假设 docker 结构
+    # 兼容本地开发路径
+    if not os.path.exists(index_path):
+        index_path = "app/static/index.html"
+    
+    if os.path.exists(index_path):
+        with open(index_path, "r", encoding="utf-8") as f:
+            return f.read()
+    return "UI File Not Found. Please check deployment."
 
 @app.get("/api/config")
-def get_config():
+async def get_config():
     return load_config()
 
 @app.post("/api/config")
-def update_config(config: dict):
+async def update_config(config: dict):
     save_config(config)
-    # 更新调度器逻辑（略）
-    return {"status": "saved"}
+    return {"status": "success", "message": "Configuration saved and scheduler updated."}
 
 @app.post("/api/backup/now")
-def trigger_backup(background_tasks: BackgroundTasks):
+async def trigger_backup_manual(background_tasks: BackgroundTasks):
+    """手动触发备份"""
     background_tasks.add_task(perform_backup)
-    return {"status": "started"}
+    return {"status": "started", "message": "Backup started in background."}
 
 @app.get("/api/backups")
-def list_backups():
+async def list_backups():
+    """列出 WebDAV 上的备份文件"""
     cfg = load_config()
+    if not cfg.get("webdav_url"):
+        return JSONResponse(status_code=400, content={"error": "WebDAV not configured"})
+    
     try:
-        client = WebDavClient(cfg["webdav_url"], auth=(cfg["webdav_user"], cfg["webdav_password"]))
+        client = WebDavClient(
+            cfg["webdav_url"], 
+            auth=(cfg.get("webdav_user", ""), cfg.get("webdav_password", ""))
+        )
         files = client.ls(cfg.get('webdav_path', '/'))
-        # 过滤并排序
-        return sorted([f for f in files if "vw_backup_" in f['name']], key=lambda x: x['name'], reverse=True)
+        
+        # 过滤备份文件
+        backup_files = []
+        for f in files:
+            if "vw_backup_" in f['name']:
+                # 简单格式化大小
+                size_mb = round(int(f.get('size', 0)) / 1024 / 1024, 2)
+                backup_files.append({
+                    "name": f['name'],
+                    "size": f"{size_mb} MB",
+                    "last_modified": f.get('last_modified', '')
+                })
+        
+        # 按名称降序 (时间)
+        return sorted(backup_files, key=lambda x: x['name'], reverse=True)
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.post("/api/restore")
-def restore_backup(file_name: str, background_tasks: BackgroundTasks):
-    # 从 WebDAV 下载 -> 解密 -> 解压 -> 覆盖 -> 重启 Vaultwarden
-    background_tasks.add_task(run_restore_process, file_name)
-    return {"status": "restore_started"}
+async def restore_from_cloud(file_name: str, background_tasks: BackgroundTasks):
+    """从云端还原"""
+    background_tasks.add_task(download_and_restore, file_name)
+    return {"status": "started", "message": f"Restoring {file_name} in background..."}
 
 @app.post("/api/upload_restore")
-def upload_restore(file: UploadFile, background_tasks: BackgroundTasks):
+async def upload_and_restore(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+    """上传本地文件还原"""
     local_path = os.path.join(TEMP_DIR, file.filename)
-    with open(local_path, "wb") as f:
-        f.write(file.file.read())
-    background_tasks.add_task(run_restore_local, local_path)
-    return {"status": "restore_started"}
-
-def run_restore_process(filename):
-    # 实现下载、解密、还原逻辑
-    # 关键点：完成后执行 supervisorctl restart vaultwarden
-    cfg = load_config()
-    client = WebDavClient(cfg["webdav_url"], auth=(cfg["webdav_user"], cfg["webdav_password"]))
-    local_path = os.path.join(TEMP_DIR, filename)
-    remote_path = f"{cfg.get('webdav_path', '/')}/{filename}".replace("//", "/")
-    client.download(remote_path, local_path)
-    run_restore_local(local_path)
-
-def run_restore_local(local_path):
-    cfg = load_config()
     try:
-        # 解密
-        if local_path.endswith(".enc"):
-            local_path = decrypt_file(local_path, cfg["encryption_password"])
+        with open(local_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
         
-        # 解压覆盖
-        with tarfile.open(local_path, "r:gz") as tar:
-            tar.extractall(path=DATA_DIR)
-        
-        # 重启 Vaultwarden
-        subprocess.run(["supervisorctl", "restart", "vaultwarden"])
-        send_telegram_notify("系统已从备份还原并重启。")
+        background_tasks.add_task(process_restore_file, local_path)
+        return {"status": "started", "message": "File uploaded. Restore starting in background..."}
     except Exception as e:
-        send_telegram_notify(f"还原失败: {e}", success=False)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+@app.get("/api/logs")
+async def get_logs():
+    """获取最后 100 行日志"""
+    if os.path.exists(LOG_FILE):
+        try:
+            with open(LOG_FILE, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+                return {"logs": "".join(lines[-100:])}
+        except:
+            return {"logs": "Error reading logs."}
+    return {"logs": "No logs yet."}
+
+# 启动代码在 supervisord 中通过 uvicorn 调用
+# uvicorn app.main:app --host 0.0.0.0 --port 5000

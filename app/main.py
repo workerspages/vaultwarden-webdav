@@ -7,12 +7,14 @@ import json
 import subprocess
 import base64
 import hashlib
+import secrets
 from typing import List, Dict, Optional
 
 # 第三方库
 import httpx
-from fastapi import FastAPI, UploadFile, BackgroundTasks, HTTPException, File
+from fastapi import FastAPI, UploadFile, BackgroundTasks, HTTPException, File, Depends, status
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -28,6 +30,10 @@ BACKUP_CONFIG_FILE = os.path.join(CONF_DIR, "backup_config.json")
 LOG_FILE = os.path.join(CONF_DIR, "manager.log")
 TEMP_DIR = "/tmp/backup_work"
 TZ_CN = timezone('Asia/Shanghai')
+
+# 读取环境变量中的管理员账号密码，默认为 admin/admin
+ADMIN_USER = os.getenv("DASHBOARD_ADMIN_USER", "admin")
+ADMIN_PASS = os.getenv("DASHBOARD_ADMIN_PASSWORD", "admin")
 
 # 确保必要目录存在
 os.makedirs(CONF_DIR, exist_ok=True)
@@ -46,8 +52,9 @@ console_handler.setLevel(logging.INFO)
 logging.getLogger().addHandler(console_handler)
 
 app = FastAPI(title="Vaultwarden Dashboard")
+security = HTTPBasic()
 
-# 允许跨域（方便开发调试，生产环境同源无影响）
+# 允许跨域
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -55,6 +62,22 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- 鉴权函数 ---
+
+def check_auth(credentials: HTTPBasicCredentials = Depends(security)):
+    """验证用户名和密码"""
+    # 使用 secrets.compare_digest 防止时序攻击
+    is_user_correct = secrets.compare_digest(credentials.username, ADMIN_USER)
+    is_pass_correct = secrets.compare_digest(credentials.password, ADMIN_PASS)
+    
+    if not (is_user_correct and is_pass_correct):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return credentials.username
 
 # --- 辅助功能函数 ---
 
@@ -167,7 +190,7 @@ def apply_retention_policy(client: WebDavClient, remote_dir: str):
             if "vw_backup_" in f['name']:
                 dt = parse_backup_date(f['name'])
                 if dt:
-                    backups.append({"name": f['name'], "dt": dt, "path": f['name']}) # webdav4 ls returns name relative or full path depending on impl, usually name
+                    backups.append({"name": f['name'], "dt": dt, "path": f['name']})
         
         # 按时间倒序排列（最新的在前面）
         backups.sort(key=lambda x: x['dt'], reverse=True)
@@ -190,19 +213,15 @@ def apply_retention_policy(client: WebDavClient, remote_dir: str):
                 to_keep.add(b['name'])
 
         # 2. 保留最近 4 周（每周一份，取该周最新的）
-        # 逻辑：按周分组，每组取第一个
         for i in range(keep_weeks):
-            # 这周的起始时间范围
             start_window = now - datetime.timedelta(weeks=i+1)
             end_window = now - datetime.timedelta(weeks=i)
-            # 在此窗口内找到最新的一个备份
             candidates = [b for b in backups if start_window <= b['dt'] < end_window]
             if candidates:
                 to_keep.add(candidates[0]['name'])
 
         # 3. 保留最近 12 个月（每月一份，取该月最新的）
         for i in range(keep_months):
-             # 简单估算一个月30天，防止复杂的日历计算
             start_window = now - datetime.timedelta(days=(i+1)*30)
             end_window = now - datetime.timedelta(days=i*30)
             candidates = [b for b in backups if start_window <= b['dt'] < end_window]
@@ -243,7 +262,7 @@ def perform_backup():
         tar_path = os.path.join(TEMP_DIR, backup_name)
         tmp_files.append(tar_path)
 
-        # 1. 备份 SQLite 数据库 (使用 sqlite3 命令行热备份，避免锁死)
+        # 1. 备份 SQLite 数据库
         sqlite_db_path = os.path.join(DATA_DIR, "db.sqlite3")
         backup_db_path = os.path.join(TEMP_DIR, "db.sqlite3")
         
@@ -257,18 +276,15 @@ def perform_backup():
         # 2. 打包文件
         logging.info("正在打包文件...")
         with tarfile.open(tar_path, "w:gz") as tar:
-            # 添加刚刚备份的数据库
             if os.path.exists(backup_db_path):
                 tar.add(backup_db_path, arcname="db.sqlite3")
             
-            # 添加其他关键数据 (附件、配置、密钥)
-            # data.json (旧版) 或 config.json (新版)
             for item in ["attachments", "sends", "rsa_key.pem", "rsa_key.pub.pem", "config.json", "data.json", "icon_cache"]:
                 p = os.path.join(DATA_DIR, item)
                 if os.path.exists(p):
                     tar.add(p, arcname=item)
         
-        # 3. 加密 (如果配置了密码)
+        # 3. 加密
         upload_path = tar_path
         if cfg.get("encryption_password"):
             logging.info("正在加密备份文件...")
@@ -284,12 +300,11 @@ def perform_backup():
         )
         
         remote_dir = cfg.get('webdav_path', '/')
-        # 确保远程目录存在 (如果库支持 mkdirs)
         try:
             if remote_dir != "/":
                 client.mkdir(remote_dir)
         except:
-            pass # 目录可能已存在
+            pass
             
         remote_path = f"{remote_dir}/{backup_name}".replace("//", "/")
         client.upload(upload_path, remote_path)
@@ -305,7 +320,6 @@ def perform_backup():
         logging.error(f"备份流程失败: {e}", exc_info=True)
         send_telegram_notify(f"备份流程发生异常: {str(e)}", success=False)
     finally:
-        # 清理临时文件
         for f in tmp_files:
             if os.path.exists(f):
                 try:
@@ -329,7 +343,7 @@ def restart_vaultwarden():
 def process_restore_file(local_file_path: str):
     """处理还原文件的核心逻辑：解密 -> 解压 -> 覆盖 -> 重启"""
     cfg = load_config()
-    temp_restored_files = [] # 用于追踪解压的临时文件(如果是加密的话)
+    temp_restored_files = []
     
     try:
         work_file = local_file_path
@@ -347,11 +361,9 @@ def process_restore_file(local_file_path: str):
         if not tarfile.is_tarfile(work_file):
             raise ValueError("文件不是有效的 tar 归档")
 
-        # 停止 Vaultwarden 以防止数据库写入冲突 (可选，但推荐)
         subprocess.run(["supervisorctl", "stop", "vaultwarden"], check=False)
 
         with tarfile.open(work_file, "r:gz") as tar:
-            # 也可以在这里做一些安全检查，防止路径遍历攻击
             tar.extractall(path=DATA_DIR)
         
         logging.info("数据覆盖完成。")
@@ -363,10 +375,8 @@ def process_restore_file(local_file_path: str):
     except Exception as e:
         logging.error(f"还原失败: {e}", exc_info=True)
         send_telegram_notify(f"还原操作失败: {str(e)}", success=False)
-        # 尝试重启服务以恢复可用性
         subprocess.run(["supervisorctl", "start", "vaultwarden"], check=False)
     finally:
-        # 清理
         if os.path.exists(local_file_path):
             os.remove(local_file_path)
         for f in temp_restored_files:
@@ -394,20 +404,16 @@ def download_and_restore(filename: str):
 
 # --- 调度器设置 ---
 
-# 初始化调度器，指定时区为上海
 scheduler = BackgroundScheduler(timezone=TZ_CN)
 
 def schedule_backup_job(config: dict):
     """根据配置更新调度任务"""
-    # 移除旧任务
     if scheduler.get_job('backup_job'):
         scheduler.remove_job('backup_job')
     
-    # 获取配置的时间，默认为凌晨 03:00
     hour = int(config.get('schedule_hour', 3))
     minute = int(config.get('schedule_minute', 0))
     
-    # 添加 Cron 任务
     scheduler.add_job(
         perform_backup, 
         CronTrigger(hour=hour, minute=minute, timezone=TZ_CN), 
@@ -416,19 +422,17 @@ def schedule_backup_job(config: dict):
     )
     logging.info(f"备份任务已调度: 每天 {hour:02d}:{minute:02d}")
 
-# 启动时加载配置并运行调度器
 scheduler.start()
 initial_cfg = load_config()
 schedule_backup_job(initial_cfg)
 
 
-# --- API 路由定义 ---
+# --- API 路由定义 (除根路径外全部开启鉴权) ---
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root():
-    """返回前端页面"""
-    index_path = "/app/static/index.html" # 假设 docker 结构
-    # 兼容本地开发路径
+    """返回前端页面 (不需要鉴权)"""
+    index_path = "/app/static/index.html"
     if not os.path.exists(index_path):
         index_path = "app/static/index.html"
     
@@ -437,24 +441,27 @@ async def read_root():
             return f.read()
     return "UI File Not Found. Please check deployment."
 
-@app.get("/api/config")
+@app.get("/api/auth_check", dependencies=[Depends(check_auth)])
+async def auth_check():
+    """用于前端验证 Token 是否有效"""
+    return {"status": "authenticated"}
+
+@app.get("/api/config", dependencies=[Depends(check_auth)])
 async def get_config():
     return load_config()
 
-@app.post("/api/config")
+@app.post("/api/config", dependencies=[Depends(check_auth)])
 async def update_config(config: dict):
     save_config(config)
-    return {"status": "success", "message": "Configuration saved and scheduler updated."}
+    return {"status": "success", "message": "Configuration saved."}
 
-@app.post("/api/backup/now")
+@app.post("/api/backup/now", dependencies=[Depends(check_auth)])
 async def trigger_backup_manual(background_tasks: BackgroundTasks):
-    """手动触发备份"""
     background_tasks.add_task(perform_backup)
     return {"status": "started", "message": "Backup started in background."}
 
-@app.get("/api/backups")
+@app.get("/api/backups", dependencies=[Depends(check_auth)])
 async def list_backups():
-    """列出 WebDAV 上的备份文件"""
     cfg = load_config()
     if not cfg.get("webdav_url"):
         return JSONResponse(status_code=400, content={"error": "WebDAV not configured"})
@@ -466,11 +473,9 @@ async def list_backups():
         )
         files = client.ls(cfg.get('webdav_path', '/'))
         
-        # 过滤备份文件
         backup_files = []
         for f in files:
             if "vw_backup_" in f['name']:
-                # 简单格式化大小
                 size_mb = round(int(f.get('size', 0)) / 1024 / 1024, 2)
                 backup_files.append({
                     "name": f['name'],
@@ -478,20 +483,17 @@ async def list_backups():
                     "last_modified": f.get('last_modified', '')
                 })
         
-        # 按名称降序 (时间)
         return sorted(backup_files, key=lambda x: x['name'], reverse=True)
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-@app.post("/api/restore")
+@app.post("/api/restore", dependencies=[Depends(check_auth)])
 async def restore_from_cloud(file_name: str, background_tasks: BackgroundTasks):
-    """从云端还原"""
     background_tasks.add_task(download_and_restore, file_name)
     return {"status": "started", "message": f"Restoring {file_name} in background..."}
 
-@app.post("/api/upload_restore")
+@app.post("/api/upload_restore", dependencies=[Depends(check_auth)])
 async def upload_and_restore(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
-    """上传本地文件还原"""
     local_path = os.path.join(TEMP_DIR, file.filename)
     try:
         with open(local_path, "wb") as buffer:
@@ -502,9 +504,8 @@ async def upload_and_restore(background_tasks: BackgroundTasks, file: UploadFile
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-@app.get("/api/logs")
+@app.get("/api/logs", dependencies=[Depends(check_auth)])
 async def get_logs():
-    """获取最后 100 行日志"""
     if os.path.exists(LOG_FILE):
         try:
             with open(LOG_FILE, 'r', encoding='utf-8') as f:
@@ -513,6 +514,3 @@ async def get_logs():
         except:
             return {"logs": "Error reading logs."}
     return {"logs": "No logs yet."}
-
-# 启动代码在 supervisord 中通过 uvicorn 调用
-# uvicorn app.main:app --host 0.0.0.0 --port 5000

@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vaultwarden 管理面板</title>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/element-plus/dist/index.css" />
+    <script src="https://unpkg.com/element-plus"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+    <style>
+        body { background-color: #f3f4f6; font-family: 'Inter', sans-serif; }
+        .glass { background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(10px); }
+    </style>
+</head>
+<body>
+    <div id="app" class="container mx-auto p-6 max-w-4xl">
+        <header class="flex justify-between items-center mb-8">
+            <h1 class="text-3xl font-bold text-gray-800">Vaultwarden <span class="text-blue-600">Admin</span></h1>
+            <el-tag type="success">Running</el-tag>
+        </header>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <!-- 状态卡片 -->
+            <el-card class="glass shadow-lg rounded-xl">
+                <template #header><div class="font-bold">操作中心</div></template>
+                <div class="flex flex-col gap-4">
+                    <el-button type="primary" size="large" @click="backupNow" :loading="loading">立即备份到云端</el-button>
+                    <el-upload action="/api/upload_restore" :on-success="handleUploadSuccess" :show-file-list="false">
+                        <el-button type="warning" size="large" class="w-full">上传 .tar.gz 还原</el-button>
+                    </el-upload>
+                </div>
+            </el-card>
+
+            <!-- 配置卡片 -->
+            <el-card class="glass shadow-lg rounded-xl">
+                <template #header><div class="font-bold">WebDAV 设置</div></template>
+                <el-form label-position="top" size="small">
+                    <el-form-item label="WebDAV URL"><el-input v-model="config.webdav_url"></el-input></el-form-item>
+                    <el-form-item label="用户名"><el-input v-model="config.webdav_user"></el-input></el-form-item>
+                    <el-form-item label="密码"><el-input type="password" v-model="config.webdav_password" show-password></el-input></el-form-item>
+                    <el-form-item label="加密密码"><el-input type="password" v-model="config.encryption_password" show-password placeholder="用于加密备份文件"></el-input></el-form-item>
+                     <el-form-item label="Telegram Token"><el-input v-model="config.tg_bot_token"></el-input></el-form-item>
+                      <el-form-item label="Telegram Chat ID"><el-input v-model="config.tg_chat_id"></el-input></el-form-item>
+                    <el-button type="success" @click="saveConfig">保存配置</el-button>
+                </el-form>
+            </el-card>
+        </div>
+
+        <!-- 历史备份列表 -->
+        <el-card class="mt-6 glass shadow-lg rounded-xl">
+            <template #header>
+                <div class="flex justify-between items-center">
+                    <span class="font-bold">云端备份历史 ({{ backups.length }})</span>
+                    <el-button size="small" @click="loadBackups" circle icon="el-icon-refresh"></el-button>
+                </div>
+            </template>
+            <el-table :data="backups" style="width: 100%" empty-text="无备份或未连接">
+                <el-table-column prop="name" label="文件名"></el-table-column>
+                <el-table-column prop="size" label="大小" width="120"></el-table-column>
+                <el-table-column label="操作" width="120">
+                    <template #default="scope">
+                        <el-popconfirm title="确定还原此备份？服务将重启。" @confirm="restore(scope.row.name)">
+                            <template #reference>
+                                <el-button size="small" type="danger">还原</el-button>
+                            </template>
+                        </el-popconfirm>
+                    </template>
+                </el-table-column>
+            </el-table>
+        </el-card>
+    </div>
+
+    <script>
+        const { createApp, ref, onMounted } = Vue;
+        createApp({
+            setup() {
+                const config = ref({});
+                const backups = ref([]);
+                const loading = ref(false);
+
+                const loadConfig = async () => {
+                    const res = await axios.get('/api/config');
+                    config.value = res.data;
+                    if(config.value.webdav_url) loadBackups();
+                };
+
+                const saveConfig = async () => {
+                    await axios.post('/api/config', config.value);
+                    ElementPlus.ElMessage.success('配置已保存');
+                };
+
+                const backupNow = async () => {
+                    loading.value = true;
+                    await axios.post('/api/backup/now');
+                    ElementPlus.ElMessage.success('后台备份任务已开始');
+                    loading.value = false;
+                };
+
+                const loadBackups = async () => {
+                    try {
+                        const res = await axios.get('/api/backups');
+                        backups.value = res.data;
+                    } catch (e) {
+                        console.error(e);
+                    }
+                };
+
+                const restore = async (name) => {
+                    await axios.post('/api/restore?file_name=' + name);
+                    ElementPlus.ElMessage.warning('还原中，完成后服务将自动重启');
+                };
+                
+                const handleUploadSuccess = () => {
+                     ElementPlus.ElMessage.warning('文件上传成功，正在还原...');
+                }
+
+                onMounted(loadConfig);
+
+                return { config, backups, saveConfig, backupNow, restore, loading, loadBackups, handleUploadSuccess };
+            }
+        }).use(ElementPlus).mount('#app');
+    </script>
+</body>
+</html>

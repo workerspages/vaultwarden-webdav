@@ -8,6 +8,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y \
     python3 \
     python3-pip \
+    python3-venv \
     python3-dev \
     build-essential \
     libffi-dev \
@@ -18,17 +19,21 @@ RUN apt-get update && apt-get install -y \
     tzdata \
     && rm -rf /var/lib/apt/lists/*
 
-# 2. 设置时区为 Asia/Shanghai (新增)
+# 2. 设置时区为 Asia/Shanghai
 ENV TZ=Asia/Shanghai
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 # 设置工作目录
 WORKDIR /
 
+# 创建 Python 虚拟环境
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
 # 复制 Python 依赖并安装
 COPY app/requirements.txt /app/requirements.txt
-# 注意：这里推荐增加 pytz 库以处理时区
-RUN pip3 install --no-cache-dir -r /app/requirements.txt --break-system-packages
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r /app/requirements.txt
 
 # 复制应用程序代码
 COPY app /app

@@ -19,7 +19,8 @@ services:
       - DASHBOARD_ADMIN_PASSWORD=admin  # 自定义面板密码
       
       # --- DDNSTO 内网穿透 (可选) ---
-      # - DDNSTO_TOKEN=你的令牌    # 从 ddnsto.com 获取，留空则不启用
+      # - DDNSTO_TOKEN=你的令牌          # 从 ddnsto.com 获取，留空则不启用
+      # - DDNSTO_DEVICE_NAME=vaultwarden # 自定义设备名称ID (英文字母/数字)
     ports:
       - "8080:80"    # Vaultwarden 服务端口 (浏览器访问密码库)
       - "5000:5000"  # 备份管理面板端口 (浏览器访问配置后台)

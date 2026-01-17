@@ -68,8 +68,9 @@ RUN mkdir -p /conf /data
 
 # 环境变量
 ENV DATA_FOLDER=/data
-# DDNSTO Token (可选，留空则不启动 DDNSTO)
+# DDNSTO (可选)
 ENV DDNSTO_TOKEN=""
+ENV DDNSTO_DEVICE_NAME="vaultwarden"
 
 # 暴露端口
 EXPOSE 80 5000

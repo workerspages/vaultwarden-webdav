@@ -25,6 +25,7 @@ RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 # 3. 下载 DDNSTO 二进制 (可选功能，根据架构选择)
 RUN ARCH=$(uname -m) && \
+    echo "Detected architecture: $ARCH" && \
     if [ "$ARCH" = "x86_64" ]; then \
         DDNSTO_ARCH="ddnsto_amd64"; \
     elif [ "$ARCH" = "aarch64" ]; then \
@@ -32,8 +33,12 @@ RUN ARCH=$(uname -m) && \
     else \
         DDNSTO_ARCH="ddnsto_amd64"; \
     fi && \
-    curl -fsSL "http://fw.koolcenter.com/binary/ddnsto/linux/${DDNSTO_ARCH}" -o /usr/local/bin/ddnsto && \
-    chmod +x /usr/local/bin/ddnsto || echo "DDNSTO download failed, skipping..."
+    DDNSTO_URL="http://fw.koolcenter.com/binary/ddnsto/linux/${DDNSTO_ARCH}" && \
+    echo "Downloading DDNSTO from: $DDNSTO_URL" && \
+    (curl --retry 3 --retry-delay 5 --connect-timeout 30 -fSL "$DDNSTO_URL" -o /usr/local/bin/ddnsto && \
+     chmod +x /usr/local/bin/ddnsto && \
+     echo "DDNSTO downloaded successfully") || \
+    (echo "DDNSTO download failed, this feature will be disabled" && true)
 
 # 设置工作目录
 WORKDIR /

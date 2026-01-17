@@ -24,14 +24,14 @@ ENV TZ=Asia/Shanghai
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 # 3. 复制 DDNSTO 二进制文件 (可选功能)
-# 支持的架构: amd64, aarch64 (文件名格式: ddnsto.amd64, ddnsto.aarch64)
+# 支持的架构: amd64, arm64 (文件名格式: ddnsto.amd64, ddnsto.arm64)
 COPY ddnsto/ /tmp/ddnsto/
 RUN ARCH=$(uname -m) && \
     echo "Detected architecture: $ARCH" && \
     if [ "$ARCH" = "x86_64" ] && [ -f /tmp/ddnsto/ddnsto.amd64 ]; then \
         cp /tmp/ddnsto/ddnsto.amd64 /usr/local/bin/ddnsto; \
-    elif [ "$ARCH" = "aarch64" ] && [ -f /tmp/ddnsto/ddnsto.aarch64 ]; then \
-        cp /tmp/ddnsto/ddnsto.aarch64 /usr/local/bin/ddnsto; \
+    elif [ "$ARCH" = "aarch64" ] && [ -f /tmp/ddnsto/ddnsto.arm64 ]; then \
+        cp /tmp/ddnsto/ddnsto.arm64 /usr/local/bin/ddnsto; \
     elif [ -f /tmp/ddnsto/ddnsto.amd64 ]; then \
         cp /tmp/ddnsto/ddnsto.amd64 /usr/local/bin/ddnsto; \
     fi && \

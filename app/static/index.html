@@ -21,6 +21,14 @@
         * { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
         body { background: linear-gradient(180deg, #f0f4f8 0%, #e2e8f0 100%); min-height: 100vh; margin: 0; }
         
+        /* 标题渐变色 */
+        .title-gradient {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
         /* 登录页 */
         .login-container { 
             min-height: 100vh; 
@@ -196,12 +204,12 @@
                 <div class="logo-section">
                     <div class="logo-icon">VW</div>
                     <div>
-                        <h1 class="text-xl font-bold text-gray-800 leading-tight">Vaultwarden <span class="text-transparent bg-clip-text" style="background: var(--primary-gradient)">Admin</span></h1>
+                        <h1 class="text-xl font-bold text-gray-800 leading-tight">Vaultwarden <span class="title-gradient">Admin</span></h1>
                         <p class="text-xs text-gray-400">备份管理控制台</p>
                     </div>
                 </div>
                 <div class="flex items-center gap-4">
-                    <el-tag type="success" effect="dark" round size="small">
+                    <el-tag type="success" round size="small">
                         <el-icon class="mr-1"><CircleCheck /></el-icon>运行中
                     </el-tag>
                     <el-button type="danger" plain size="small" @click="logout" icon="SwitchButton">退出</el-button>

@@ -23,6 +23,11 @@ RUN apt-get update && apt-get install -y \
 ENV TZ=Asia/Shanghai
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
+# 3. 下载 DDNSTO 二进制 (可选功能)
+RUN curl -fsSL http://fw.koolcenter.com/binary/ddnsto/linux/ddnsto_amd64 -o /usr/local/bin/ddnsto \
+    && chmod +x /usr/local/bin/ddnsto \
+    || echo "DDNSTO download failed, skipping..."
+
 # 设置工作目录
 WORKDIR /
 
@@ -38,17 +43,21 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # 复制应用程序代码
 COPY app /app
 
-# 复制 Supervisor 配置
+# 复制 Supervisor 配置和启动脚本
 COPY conf/supervisord.conf /etc/supervisord.conf
+COPY conf/start.sh /start.sh
+RUN chmod +x /start.sh
 
 # 创建目录
 RUN mkdir -p /conf /data
 
 # 环境变量
 ENV DATA_FOLDER=/data
+# DDNSTO Token (可选，留空则不启动 DDNSTO)
+ENV DDNSTO_TOKEN=""
 
 # 暴露端口
 EXPOSE 80 5000
 
-# 启动命令
-CMD ["/usr/bin/supervisord", "-c", "/etc/supervisord.conf"]
+# 启动命令 (通过入口脚本)
+CMD ["/start.sh"]

@@ -123,6 +123,87 @@ def send_telegram_notify(msg: str, success: bool = True):
     except Exception as e:
         logging.error(f"Telegram 发送失败: {e}")
 
+def send_bark_notify(msg: str, success: bool = True):
+    """发送 Bark 通知 (iOS)"""
+    cfg = load_config()
+    bark_url = cfg.get("bark_url", "").strip()
+    
+    if not bark_url:
+        return
+    
+    title = "Vaultwarden 备份成功" if success else "Vaultwarden 备份/还原失败"
+    icon = "checkmark.circle.fill" if success else "xmark.circle.fill"
+    
+    # 支持两种格式: https://api.day.app/xxx 或 https://api.day.app/xxx/
+    bark_url = bark_url.rstrip('/')
+    
+    try:
+        # Bark API v2 格式
+        url = f"{bark_url}/{title}/{msg}"
+        params = {
+            "icon": f"https://cdn-icons-png.flaticon.com/512/6195/6195699.png",
+            "group": "Vaultwarden",
+            "sound": "success" if success else "failure"
+        }
+        httpx.get(url, params=params, timeout=10)
+    except Exception as e:
+        logging.error(f"Bark 发送失败: {e}")
+
+def send_email_notify(msg: str, success: bool = True):
+    """发送邮件通知"""
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.header import Header
+    
+    cfg = load_config()
+    smtp_host = cfg.get("smtp_host", "").strip()
+    smtp_port = int(cfg.get("smtp_port", 465))
+    smtp_user = cfg.get("smtp_user", "").strip()
+    smtp_pass = cfg.get("smtp_pass", "")
+    mail_to = cfg.get("mail_to", "").strip()
+    
+    if not all([smtp_host, smtp_user, smtp_pass, mail_to]):
+        return
+    
+    title = "✅ Vaultwarden 备份成功" if success else "❌ Vaultwarden 备份/还原失败"
+    time_str = datetime.datetime.now(TZ_CN).strftime('%Y-%m-%d %H:%M:%S')
+    
+    body = f"""
+{title}
+
+{msg}
+
+时间: {time_str}
+---
+此邮件由 Vaultwarden Backup Admin 自动发送
+"""
+    
+    try:
+        message = MIMEText(body, 'plain', 'utf-8')
+        message['From'] = smtp_user
+        message['To'] = mail_to
+        message['Subject'] = Header(title, 'utf-8')
+        
+        # 尝试 SSL 连接
+        if smtp_port == 465:
+            server = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=10)
+        else:
+            server = smtplib.SMTP(smtp_host, smtp_port, timeout=10)
+            server.starttls()
+        
+        server.login(smtp_user, smtp_pass)
+        server.sendmail(smtp_user, [mail_to], message.as_string())
+        server.quit()
+    except Exception as e:
+        logging.error(f"邮件发送失败: {e}")
+
+def send_notifications(msg: str, success: bool = True):
+    """统一发送所有通知"""
+    send_telegram_notify(msg, success)
+    send_bark_notify(msg, success)
+    send_email_notify(msg, success)
+
+
 # --- 服务控制函数 ---
 
 def stop_service():
@@ -252,7 +333,7 @@ def perform_backup():
             start_service()
         except Exception as e:
             logging.error(f"服务启动失败! 请手动检查: {e}")
-            send_telegram_notify("严重错误：备份后服务无法自动启动！", success=False)
+            send_notifications("严重错误：备份后服务无法自动启动！", success=False)
             raise e
 
         # 4. 上传
@@ -281,7 +362,7 @@ def perform_backup():
 
     except Exception as e:
         logging.error(f"备份流程异常: {e}", exc_info=True)
-        send_telegram_notify(f"备份失败: {str(e)}", success=False)
+        send_notifications(f"备份失败: {str(e)}", success=False)
     finally:
         # 清理临时文件
         for f in tmp_files:
@@ -350,7 +431,7 @@ def process_restore_file(local_file_path: str):
 
     except Exception as e:
         logging.error(f"还原失败: {e}", exc_info=True)
-        send_telegram_notify(f"还原失败: {str(e)}", success=False)
+        send_notifications(f"还原失败: {str(e)}", success=False)
         # 尝试保底启动
         try:
             start_service() 
@@ -382,7 +463,7 @@ def download_and_restore(filename: str):
         process_restore_file(local_path)
     except Exception as e:
         logging.error(f"下载/还原过程出错: {e}")
-        send_telegram_notify(f"下载/还原出错: {e}", success=False)
+        send_notifications(f"下载/还原出错: {e}", success=False)
 
 # --- 调度器设置 ---
 

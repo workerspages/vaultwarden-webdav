@@ -357,6 +357,47 @@
                                             </div>
                                         </el-form>
                                     </el-collapse-item>
+
+                                    <!-- Bark 通知 (iOS) -->
+                                    <el-collapse-item name="bark">
+                                        <template #title>
+                                            <el-icon class="mr-2"><Iphone /></el-icon> Bark 通知 (iOS)
+                                        </template>
+                                        <el-form label-position="top" size="default">
+                                            <el-form-item label="Bark 推送地址">
+                                                <el-input v-model="config.bark_url" placeholder="https://api.day.app/xxxxxxxx"></el-input>
+                                                <p class="text-xs text-gray-400 mt-1">在 Bark App 中复制推送地址</p>
+                                            </el-form-item>
+                                        </el-form>
+                                    </el-collapse-item>
+
+                                    <!-- 邮件通知 -->
+                                    <el-collapse-item name="email">
+                                        <template #title>
+                                            <el-icon class="mr-2"><Message /></el-icon> 邮件通知
+                                        </template>
+                                        <el-form label-position="top" size="default">
+                                            <div class="grid grid-cols-2 gap-4">
+                                                <el-form-item label="SMTP 服务器">
+                                                    <el-input v-model="config.smtp_host" placeholder="smtp.example.com"></el-input>
+                                                </el-form-item>
+                                                <el-form-item label="端口">
+                                                    <el-input-number v-model="config.smtp_port" :min="1" :max="65535" class="w-full" placeholder="465"></el-input-number>
+                                                </el-form-item>
+                                            </div>
+                                            <div class="grid grid-cols-2 gap-4">
+                                                <el-form-item label="SMTP 用户名">
+                                                    <el-input v-model="config.smtp_user" placeholder="user@example.com"></el-input>
+                                                </el-form-item>
+                                                <el-form-item label="SMTP 密码">
+                                                    <el-input type="password" v-model="config.smtp_pass" show-password placeholder="授权码或密码"></el-input>
+                                                </el-form-item>
+                                            </div>
+                                            <el-form-item label="收件邮箱">
+                                                <el-input v-model="config.mail_to" placeholder="notify@example.com"></el-input>
+                                            </el-form-item>
+                                        </el-form>
+                                    </el-collapse-item>
                                 </el-collapse>
 
                                 <el-button class="w-full mt-6 h-11 btn-gradient-success" @click="saveConfig" icon="Check">

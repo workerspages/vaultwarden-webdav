@@ -40,6 +40,7 @@ jobs:
         with:
           images: |
             ghcr.io/${{ github.repository }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/vaultwarden-webdav
           tags: |
             type=ref,event=branch
             type=ref,event=tag

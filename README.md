@@ -16,18 +16,18 @@
 ## ✨ 核心功能
 
 *   **🔒 官方同步**：基于 `vaultwarden/server:latest` 构建，核心服务与官方保持一致。
-*   **📦 纯净备份**：采用 **"停止服务 -> 打包 -> 启动服务"** 的逻辑，确保 SQLite 数据库（尤其是 WAL 模式下）的绝对数据一致性。
+*   **📦 纯净备份**：采用 **"停止服务 -> 打包 -> 启动服务"** 的逻辑，确保 SQLite 数据库的绝对数据一致性。
 *   **🔐 AES-256 加密**：备份文件为 `.zip` 格式，支持 AES-256 密码加密。
-    *   *优势*：你可以直接下载备份文件，在 Windows/Mac/Linux 上使用 WinRAR、7-Zip、Keka 等软件双击解压（需输入密码），无需专用工具解密。
 *   **☁️ WebDAV 上传**：支持将备份自动上传到坚果云、Nextcloud、Alist 等支持 WebDAV 的网盘。
 *   **🖥️ 可视化面板**：
     *   独立的管理后台（默认端口 5000）。
     *   美观的 Vue3 + Element Plus 界面。
-    *   支持在线配置 WebDAV、Cron 定时策略、Telegram 通知。
+    *   支持在线配置 WebDAV、Cron 定时策略、通知渠道。
     *   支持从云端列表一键还原，或上传本地 `.zip` 文件还原。
-*   **🤖 智能保留**：支持设置云端最大保留数量（如保留最近 10 份），自动清理旧备份。
-*   **⏰ Cron 定时**：支持自定义 Cron 表达式（如 `0 3 * * *` 每天凌晨3点备份）。
-*   **📢 异常通知**：集成 Telegram Bot，仅在备份或还原**失败**时发送通知，避免打扰。
+*   **🤖 智能保留**：支持设置云端最大保留数量，自动清理旧备份。
+*   **⏰ Cron 定时**：支持自定义 Cron 表达式。
+*   **📢 多渠道通知**：支持 Telegram、Bark (iOS)、邮件通知，仅在备份/还原**失败**时发送。
+*   **🌐 DDNSTO 内网穿透** (可选)：内置 DDNSTO 客户端，配置 Token 即可随时随地访问密码库。
 
 ---
 
@@ -60,20 +60,23 @@ services:
     restart: always
     # 核心数据映射
     volumes:
-      - ./vw-data:/data  # Vaultwarden 的核心数据（数据库、密钥、附件等）
+      - ./vw-data:/data  # Vaultwarden 的核心数据
       - ./vw-conf:/conf  # 备份面板的配置文件和日志
     # 环境变量配置
     environment:
-      - TZ=Asia/Shanghai            # 设置时区（非常重要，影响定时备份时间）
+      - TZ=Asia/Shanghai            # 设置时区
       - WEBSOCKET_ENABLED=true      # 开启 WebSocket 支持
-      - SIGNUPS_ALLOWED=false       # 禁止新用户注册（建议设为 false）
+      - SIGNUPS_ALLOWED=false       # 禁止新用户注册
       
       # --- 面板登录账号设置 ---
-      - DASHBOARD_ADMIN_USER=admin      # 自定义面板用户名
-      - DASHBOARD_ADMIN_PASSWORD=admin  # 自定义面板密码
+      - DASHBOARD_ADMIN_USER=admin
+      - DASHBOARD_ADMIN_PASSWORD=admin
+      
+      # --- DDNSTO 内网穿透 (可选) ---
+      # - DDNSTO_TOKEN=你的令牌    # 从 ddnsto.com 获取，留空则不启用
     ports:
-      - "8080:80"    # Vaultwarden 服务端口 (浏览器访问密码库)
-      - "5000:5000"  # 备份管理面板端口 (浏览器访问配置后台)
+      - "8080:80"    # Vaultwarden 服务端口
+      - "5000:5000"  # 备份管理面板端口
 ```
 
 ### 4. 启动服务
@@ -123,6 +126,7 @@ docker-compose up -d
 | `DASHBOARD_ADMIN_PASSWORD` | `admin` | 管理面板的登录密码 |
 | `WEBSOCKET_ENABLED` | `true` | 是否启用 Vaultwarden 的 WebSocket |
 | `SIGNUPS_ALLOWED` | `false` | 是否允许新用户注册 |
+| `DDNSTO_TOKEN` | (空) | DDNSTO 令牌，留空则不启用内网穿透 |
 | `DATA_FOLDER` | `/data` | **不要修改**，内部路径硬编码 |
 
 ### 路径映射 (Volumes)

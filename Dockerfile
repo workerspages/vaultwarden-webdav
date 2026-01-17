@@ -23,10 +23,17 @@ RUN apt-get update && apt-get install -y \
 ENV TZ=Asia/Shanghai
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
-# 3. 下载 DDNSTO 二进制 (可选功能)
-RUN curl -fsSL http://fw.koolcenter.com/binary/ddnsto/linux/ddnsto_amd64 -o /usr/local/bin/ddnsto \
-    && chmod +x /usr/local/bin/ddnsto \
-    || echo "DDNSTO download failed, skipping..."
+# 3. 下载 DDNSTO 二进制 (可选功能，根据架构选择)
+RUN ARCH=$(uname -m) && \
+    if [ "$ARCH" = "x86_64" ]; then \
+        DDNSTO_ARCH="ddnsto_amd64"; \
+    elif [ "$ARCH" = "aarch64" ]; then \
+        DDNSTO_ARCH="ddnsto_aarch64"; \
+    else \
+        DDNSTO_ARCH="ddnsto_amd64"; \
+    fi && \
+    curl -fsSL "http://fw.koolcenter.com/binary/ddnsto/linux/${DDNSTO_ARCH}" -o /usr/local/bin/ddnsto && \
+    chmod +x /usr/local/bin/ddnsto || echo "DDNSTO download failed, skipping..."
 
 # 设置工作目录
 WORKDIR /

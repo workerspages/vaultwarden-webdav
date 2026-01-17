@@ -4,10 +4,14 @@ FROM vaultwarden/server:latest
 # 设置非交互模式，防止安装 tzdata 时卡住
 ARG DEBIAN_FRONTEND=noninteractive
 
-# 1. 安装 Python 环境、工具以及 tzdata (新增)
+# 1. 安装 Python 环境、构建工具以及 tzdata
 RUN apt-get update && apt-get install -y \
     python3 \
     python3-pip \
+    python3-dev \
+    build-essential \
+    libffi-dev \
+    libssl-dev \
     supervisor \
     sqlite3 \
     curl \

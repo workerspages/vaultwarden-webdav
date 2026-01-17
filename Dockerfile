@@ -23,22 +23,25 @@ RUN apt-get update && apt-get install -y \
 ENV TZ=Asia/Shanghai
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
-# 3. 下载 DDNSTO 二进制 (可选功能，根据架构选择)
+# 3. 复制 DDNSTO 二进制文件 (可选功能)
+# 支持的架构: amd64, aarch64 (文件名格式: ddnsto.amd64, ddnsto.aarch64)
+COPY ddnsto/ /tmp/ddnsto/
 RUN ARCH=$(uname -m) && \
     echo "Detected architecture: $ARCH" && \
-    if [ "$ARCH" = "x86_64" ]; then \
-        DDNSTO_ARCH="ddnsto_amd64"; \
-    elif [ "$ARCH" = "aarch64" ]; then \
-        DDNSTO_ARCH="ddnsto_aarch64"; \
-    else \
-        DDNSTO_ARCH="ddnsto_amd64"; \
+    if [ "$ARCH" = "x86_64" ] && [ -f /tmp/ddnsto/ddnsto.amd64 ]; then \
+        cp /tmp/ddnsto/ddnsto.amd64 /usr/local/bin/ddnsto; \
+    elif [ "$ARCH" = "aarch64" ] && [ -f /tmp/ddnsto/ddnsto.aarch64 ]; then \
+        cp /tmp/ddnsto/ddnsto.aarch64 /usr/local/bin/ddnsto; \
+    elif [ -f /tmp/ddnsto/ddnsto.amd64 ]; then \
+        cp /tmp/ddnsto/ddnsto.amd64 /usr/local/bin/ddnsto; \
     fi && \
-    DDNSTO_URL="http://fw.koolcenter.com/binary/ddnsto/linux/${DDNSTO_ARCH}" && \
-    echo "Downloading DDNSTO from: $DDNSTO_URL" && \
-    (curl --retry 3 --retry-delay 5 --connect-timeout 30 -fSL "$DDNSTO_URL" -o /usr/local/bin/ddnsto && \
-     chmod +x /usr/local/bin/ddnsto && \
-     echo "DDNSTO downloaded successfully") || \
-    (echo "DDNSTO download failed, this feature will be disabled" && true)
+    if [ -f /usr/local/bin/ddnsto ]; then \
+        chmod +x /usr/local/bin/ddnsto && \
+        echo "DDNSTO binary installed successfully"; \
+    else \
+        echo "DDNSTO binary not found for this architecture"; \
+    fi && \
+    rm -rf /tmp/ddnsto
 
 # 设置工作目录
 WORKDIR /
